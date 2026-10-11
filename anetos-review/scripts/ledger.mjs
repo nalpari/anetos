@@ -71,3 +71,134 @@ export function list(ledger, { files, status } = {}) {
     (f) => (!wanted || wanted.has(f.file)) && (!status || f.status === status),
   );
 }
+
+const CATEGORIES = ['bug', 'security', 'data-loss', 'concurrency'];
+
+function validateResults(ledger, results) {
+  if (!results || typeof results !== 'object') return ['결과가 객체가 아닙니다'];
+  const errors = [];
+  const filled = (v) => typeof v === 'string' && v.trim() !== '';
+  if (!filled(results.commit)) errors.push('commit: 비어 있지 않은 문자열이어야 합니다');
+  for (const key of ['rechecks', 'violations', 'candidates']) {
+    if (!Array.isArray(results[key])) errors.push(`${key}: 배열이어야 합니다`);
+  }
+  if (errors.length) return errors;
+
+  const statusById = new Map(ledger.findings.map((f) => [f.id, f.status]));
+  const checkHit = (hit, at) => {
+    for (const key of ['file', 'symbol', 'title', 'evidence']) {
+      if (!filled(hit[key])) errors.push(`${at}: ${key} 가 비어 있습니다`);
+    }
+    if (hit.matches != null && !statusById.has(hit.matches)) {
+      errors.push(`${at}: matches 가 원장에 없는 id 를 가리킵니다 (${hit.matches})`);
+    }
+  };
+
+  results.rechecks.forEach((r, i) => {
+    const at = `rechecks[${i}]`;
+    if (!statusById.has(r.id)) errors.push(`${at}: 원장에 없는 id 입니다 (${r.id})`);
+    else if (statusById.get(r.id) !== 'open') {
+      errors.push(`${at}: ${r.id} 의 상태가 open 이 아닙니다 (${statusById.get(r.id)})`);
+    }
+    if (r.verdict !== 'present' && r.verdict !== 'absent') {
+      errors.push(`${at}: verdict 는 present 또는 absent 여야 합니다`);
+    }
+  });
+  results.violations.forEach((v, i) => {
+    const at = `violations[${i}]`;
+    if (!/^R-\d+$/.test(v.source ?? '')) errors.push(`${at}: source 는 R-숫자 형식이어야 합니다`);
+    checkHit(v, at);
+  });
+  results.candidates.forEach((c, i) => {
+    const at = `candidates[${i}]`;
+    if (!CATEGORIES.includes(c.category)) {
+      errors.push(`${at}: category 는 ${CATEGORIES.join(', ')} 중 하나여야 합니다`);
+    }
+    if (c.verdict !== 'confirmed' && c.verdict !== 'unconfirmed') {
+      errors.push(`${at}: verdict 는 confirmed 또는 unconfirmed 여야 합니다`);
+    }
+    checkHit(c, at);
+  });
+  return errors;
+}
+
+export function apply(ledger, results) {
+  const errors = validateResults(ledger, results);
+  if (errors.length) throw new LedgerError(`결과 형식 오류:\n- ${errors.join('\n- ')}`);
+
+  const { commit } = results;
+  const byId = new Map(ledger.findings.map((f) => [f.id, f]));
+  const summary = {
+    new: new Set(),
+    stillOpen: new Set(),
+    resolved: new Set(),
+    recurred: new Set(),
+    reopenRequested: new Set(),
+    dismissed: new Set(),
+  };
+
+  const hits = [
+    ...results.violations.map((v) => ({ ...v, confirmed: true })),
+    ...results.candidates.map((c) => ({
+      ...c,
+      source: `explore:${c.category}`,
+      confirmed: c.verdict === 'confirmed',
+    })),
+  ].map((h) => ({
+    ...h,
+    file: normFile(h.file),
+    id: h.matches ?? findingId(h.source, h.file, h.symbol),
+  }));
+  const confirmedIds = new Set(hits.filter((h) => h.confirmed).map((h) => h.id));
+
+  for (const r of results.rechecks) {
+    const f = byId.get(r.id);
+    f.lastChecked = commit;
+    if (r.verdict === 'present' || confirmedIds.has(r.id)) {
+      summary.stillOpen.add(r.id);
+    } else {
+      f.status = 'resolved';
+      summary.resolved.add(r.id);
+    }
+  }
+
+  for (const h of hits) {
+    const f = byId.get(h.id);
+    if (!f) {
+      const created = {
+        id: h.id,
+        source: h.source,
+        file: h.file,
+        symbol: h.symbol,
+        title: h.title,
+        evidence: h.evidence,
+        status: h.confirmed ? 'open' : 'dismissed',
+        firstSeen: commit,
+        lastChecked: commit,
+        decisionId: null,
+      };
+      ledger.findings.push(created);
+      byId.set(h.id, created);
+      (h.confirmed ? summary.new : summary.dismissed).add(h.id);
+      continue;
+    }
+    if (!h.confirmed || f.status === 'dismissed') continue;
+
+    f.lastChecked = commit;
+    f.evidence = h.evidence;
+    if (f.status === 'open') {
+      if (!summary.new.has(h.id) && !summary.recurred.has(h.id)) summary.stillOpen.add(h.id);
+    } else if (f.status === 'resolved') {
+      f.status = 'open';
+      summary.recurred.add(h.id);
+    } else if (f.status === 'intended' || f.status === 'rejected') {
+      f.previousStatus = f.status;
+      f.status = 'reopen-requested';
+      summary.reopenRequested.add(h.id);
+    } else if (f.status === 'reopen-requested') {
+      summary.reopenRequested.add(h.id);
+    }
+  }
+
+  return Object.fromEntries(Object.entries(summary).map(([key, ids]) => [key, [...ids]]));
+}
