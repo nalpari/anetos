@@ -9,6 +9,7 @@ import { LedgerError, findingId, init, loadLedger, saveLedger } from './ledger.m
 import {
   validateConfig, loadConfig, saveConfig, globToRegExp, isTestPath,
   runCheck, compare,
+  start, abort,
 } from './fix.mjs';
 
 const PLUGIN_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -141,4 +142,172 @@ test('compare: 기준선 대비 네 가지 판정', () => {
     [['a', 'kept'], ['b', 'regressed'], ['c', 'masked'], ['d', 'improved']],
   );
   assert.equal(verdicts[1].tail, 'b:fail');
+});
+
+// src/a.js 에 BROKEN 이 있거나, 테스트 파일에 REPRO 가 있는데 src/a.js 에 FIXED 가 없으면 실패한다.
+const SUITE = helper(
+  'suite.js',
+  [
+    "const fs=require('fs');",
+    "const src=fs.readFileSync('src/a.js','utf8');",
+    "const t=fs.existsSync('test/a.test.js')?fs.readFileSync('test/a.test.js','utf8'):'';",
+    "console.log('suite ran');",
+    "if(src.includes('BROKEN'))process.exit(1);",
+    "if(t.includes('REPRO')&&!src.includes('FIXED'))process.exit(1);",
+    'process.exit(0);',
+  ].join('\n'),
+);
+
+const FID = findingId('R-001', 'src/a.js', 'foo');
+
+function g(root, ...args) {
+  const r = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+  assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  return r.stdout;
+}
+
+function makeRepo({ checks, status = 'open', title = '제목' } = {}) {
+  const root = tmpDir();
+  g(root, 'init', '-q');
+  g(root, 'config', 'user.email', 't@example.com');
+  g(root, 'config', 'user.name', 't');
+  g(root, 'config', 'commit.gpgsign', 'false');
+  g(root, 'config', 'core.autocrlf', 'false');
+  write(root, 'src/a.js', 'function foo() {}\n');
+  init(root, PLUGIN_ROOT);
+  saveLedger(root, {
+    version: 1,
+    findings: [
+      {
+        id: FID, source: 'R-001', file: 'src/a.js', symbol: 'foo', title,
+        evidence: 'src/a.js:1', status, firstSeen: 'c0', lastChecked: 'c0', decisionId: null,
+      },
+    ],
+  });
+  saveConfig(root, {
+    version: 1,
+    checks: checks ?? [{ name: 'test', kind: 'test', command: SUITE }],
+    testPaths: ['test/**'],
+  });
+  g(root, 'add', '-A');
+  g(root, 'commit', '-q', '-m', 'init');
+  return root;
+}
+
+function readStateFile(root) {
+  return JSON.parse(fs.readFileSync(path.join(root, '.review', 'fix.tmp'), 'utf8'));
+}
+
+function statusOutsideReview(root) {
+  return g(root, 'status', '--porcelain', '--untracked-files=all')
+    .split('\n')
+    .filter((line) => line && !line.includes('.review/'))
+    .sort();
+}
+
+test('start: 기준선을 실행하고 가려진 검사를 알려준다', () => {
+  const root = makeRepo({
+    checks: [
+      { name: 'test', kind: 'test', command: SUITE },
+      { name: 'lint', kind: 'static', command: FAIL },
+    ],
+  });
+  const logged = [];
+  const result = start(root, FID, (line) => logged.push(line));
+  assert.deepEqual(result, {
+    id: FID,
+    baseline: [
+      { name: 'test', kind: 'test', result: 'pass' },
+      { name: 'lint', kind: 'static', result: 'fail' },
+    ],
+    masked: ['lint'],
+  });
+  assert.equal(logged.length, 2);
+  assert.ok(logged[0].includes(SUITE));
+  const state = readStateFile(root);
+  assert.equal(state.id, FID);
+  assert.equal(state.stage, 'started');
+  assert.equal(state.head, g(root, 'rev-parse', 'HEAD').trim());
+});
+
+test('start: 전제 조건이 맞지 않으면 거부하고 상태 파일을 만들지 않는다', () => {
+  const noState = (root) => assert.equal(fs.existsSync(path.join(root, '.review', 'fix.tmp')), false);
+
+  const dirty = makeRepo();
+  write(dirty, 'src/a.js', 'function foo() { edited }\n');
+  assert.throws(() => start(dirty, FID), /커밋하지 않은 변경/);
+  noState(dirty);
+
+  const resolved = makeRepo({ status: 'resolved' });
+  assert.throws(() => start(resolved, FID), /open/);
+  noState(resolved);
+
+  const unknown = makeRepo();
+  assert.throws(() => start(unknown, 'F-missing'), /원장에 없는/);
+  noState(unknown);
+
+  const noConfig = makeRepo();
+  fs.rmSync(path.join(noConfig, '.review', 'config.json'));
+  g(noConfig, 'commit', '-q', '-am', 'drop config');
+  assert.throws(() => start(noConfig, FID), /review-config/);
+  noState(noConfig);
+
+  const busy = makeRepo();
+  start(busy, FID);
+  assert.throws(() => start(busy, FID), /진행 중인 수정/);
+
+  const notRepo = tmpDir();
+  init(notRepo, PLUGIN_ROOT);
+  saveConfig(notRepo, { version: 1, checks: [], testPaths: ['test/**'] });
+  saveLedger(notRepo, loadLedger(makeRepo()));
+  assert.throws(() => start(notRepo, FID), LedgerError);
+});
+
+test('start: 미추적 파일, 커밋 안 한 .review, 검사가 만든 파일은 막지 않고 원래 있던 것으로 기록한다', () => {
+  const artifact = helper(
+    'artifact.js',
+    "const fs=require('fs');fs.mkdirSync('coverage',{recursive:true});fs.writeFileSync('coverage/out.txt','x');",
+  );
+  const root = makeRepo({ checks: [{ name: 'test', kind: 'test', command: artifact }] });
+  write(root, 'notes.txt', '메모');
+  write(root, '.review/rules.md', '## R-900 고친 규칙\n');
+  start(root, FID);
+  assert.deepEqual(readStateFile(root).untracked.sort(), ['coverage/out.txt', 'notes.txt']);
+});
+
+test('abort: 수정이 만든 변경만 되돌린다', () => {
+  const root = makeRepo();
+  write(root, 'notes.txt', '메모');
+  write(root, '.review/rules.md', '## R-900 고친 규칙\n');
+  const before = statusOutsideReview(root);
+  start(root, FID);
+
+  write(root, 'src/a.js', 'function foo() { BROKEN }\n');
+  write(root, 'test/새 파일.test.js', 'REPRO\n');
+  write(root, 'src/b.js', 'staged\n');
+  g(root, 'add', 'src/b.js');
+
+  assert.deepEqual(abort(root), { aborted: true, id: FID, fixAttempts: 1 });
+  assert.deepEqual(statusOutsideReview(root), before);
+  assert.equal(fs.readFileSync(path.join(root, 'src', 'a.js'), 'utf8'), 'function foo() {}\n');
+  assert.equal(fs.existsSync(path.join(root, 'test', '새 파일.test.js')), false);
+  assert.equal(fs.existsSync(path.join(root, 'src', 'b.js')), false);
+  assert.equal(fs.readFileSync(path.join(root, 'notes.txt'), 'utf8'), '메모');
+  assert.equal(
+    fs.readFileSync(path.join(root, '.review', 'rules.md'), 'utf8'),
+    '## R-900 고친 규칙\n',
+  );
+  assert.equal(loadLedger(root).findings[0].fixAttempts, 1);
+  assert.equal(loadLedger(root).findings[0].status, 'open');
+  assert.equal(fs.existsSync(path.join(root, '.review', 'fix.tmp')), false);
+});
+
+test('abort: 진행 중인 수정이 없으면 아무것도 하지 않는다', () => {
+  const root = makeRepo();
+  write(root, 'src/a.js', 'function foo() { 사용자가 고치는 중 }\n');
+  assert.deepEqual(abort(root), { aborted: false });
+  assert.equal(
+    fs.readFileSync(path.join(root, 'src', 'a.js'), 'utf8'),
+    'function foo() { 사용자가 고치는 중 }\n',
+  );
 });
