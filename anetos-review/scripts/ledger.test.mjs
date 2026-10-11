@@ -460,3 +460,17 @@ test('CLI: 틀린 입력은 종료 코드 1 이고 원장을 건드리지 않는
   assert.equal(cli(tmpDir(), 'list').code, 1);
   assert.equal(fs.readFileSync(ledgerFile, 'utf8'), before);
 });
+
+test('rules/default.md: 규칙 10개가 형식에 맞고 ID 가 겹치지 않는다', () => {
+  const file = fileURLToPath(new URL('../rules/default.md', import.meta.url));
+  const sections = fs.readFileSync(file, 'utf8').split(/^(?=## )/m).filter((s) => s.startsWith('## '));
+  assert.equal(sections.length, 10);
+  const ids = sections.map((s) => s.match(/^## (R-\d{3}) \S/)?.[1]);
+  assert.equal(ids.includes(undefined), false);
+  assert.equal(new Set(ids).size, 10);
+  for (const section of sections) {
+    assert.match(section, /^- 적용: \S/m);
+    assert.match(section, /^- 설명: \S/m);
+    assert.match(section, /^- 위반 예: \S/m);
+  }
+});
