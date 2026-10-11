@@ -20,6 +20,17 @@ export function findingId(source, file, symbol) {
   return `F-${hash.slice(0, 8)}`;
 }
 
+// 결정 시점의 코드를 고정하는 해시. 줄바꿈 변환만으로는 달라지지 않는다.
+export function fileHash(root, file) {
+  let text;
+  try {
+    text = fs.readFileSync(path.join(root, file), 'utf8');
+  } catch {
+    return null;
+  }
+  return createHash('sha1').update(text.replace(/\r\n/g, '\n')).digest('hex');
+}
+
 export function init(root, pluginRoot) {
   const dir = path.join(root, DIR);
   if (fs.existsSync(dir)) return { created: false };
@@ -125,7 +136,7 @@ function validateResults(ledger, results) {
   return errors;
 }
 
-export function apply(ledger, results) {
+export function apply(ledger, results, hashOf = () => null) {
   const errors = validateResults(ledger, results);
   if (errors.length) throw new LedgerError(`결과 형식 오류:\n- ${errors.join('\n- ')}`);
 
@@ -137,6 +148,7 @@ export function apply(ledger, results) {
     resolved: new Set(),
     recurred: new Set(),
     reopenRequested: new Set(),
+    decided: new Set(),
     dismissed: new Set(),
   };
 
@@ -200,9 +212,14 @@ export function apply(ledger, results) {
       f.status = 'open';
       summary.recurred.add(h.id);
     } else if (f.status === 'intended' || f.status === 'rejected') {
-      f.previousStatus = f.status;
-      f.status = 'reopen-requested';
-      summary.reopenRequested.add(h.id);
+      // 결정 이후 파일이 그대로면 같은 논의를 다시 꺼내지 않는다.
+      if (f.decidedHash && hashOf(f.file) === f.decidedHash) {
+        summary.decided.add(h.id);
+      } else {
+        f.previousStatus = f.status;
+        f.status = 'reopen-requested';
+        summary.reopenRequested.add(h.id);
+      }
     } else if (f.status === 'reopen-requested') {
       summary.reopenRequested.add(h.id);
     }
@@ -246,6 +263,8 @@ export function decide(root, ledger, id, decision, reason, date = new Date().toI
     delete f.previousStatus;
   }
   f.decisionId = decisionId;
+  if (decision === 'reopen') delete f.decidedHash;
+  else f.decidedHash = fileHash(root, f.file);
 
   const oneLine = reason.trim().replace(/\s*[\r\n]+\s*/g, ' ');
   const entry = `\n## ${decisionId}\n- 날짜: ${date}\n- 지적: ${id}\n- 대상: ${f.file} ${f.symbol}\n- 결정: ${decision}\n- 이유: ${oneLine}\n`;
@@ -302,7 +321,7 @@ function main(argv) {
         throw new LedgerError(`결과 파일을 읽을 수 없습니다: ${e.message}`);
       }
       const ledger = loadLedger(root);
-      const summary = apply(ledger, results);
+      const summary = apply(ledger, results, (file) => fileHash(root, file));
       saveLedger(root, ledger);
       return out(summary);
     }

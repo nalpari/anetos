@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  findingId, init, loadLedger, saveLedger, list, apply, decide, LedgerError,
+  findingId, fileHash, init, loadLedger, saveLedger, list, apply, decide, LedgerError,
 } from './ledger.mjs';
 
 function tmpDir() {
@@ -560,4 +560,81 @@ test('skills: review 가 스테이징·미추적·삭제 파일과 후보 eviden
   assert.match(review, /git ls-files --others --exclude-standard/);
   assert.match(review, /ledger\.mjs" list --status open/);
   assert.match(review, /`file`, `symbol`, `evidence` 는 explorer 가 낸 값을 그대로/);
+});
+
+function rootWithSource(text = 'function foo() {}\n') {
+  const root = initRoot();
+  fs.mkdirSync(path.join(root, 'src'));
+  fs.writeFileSync(path.join(root, 'src', 'a.js'), text);
+  return root;
+}
+
+test('fileHash: 줄바꿈 방식이 달라도 같고 파일이 없으면 null', () => {
+  const root = rootWithSource('a\nb\n');
+  const lf = fileHash(root, 'src/a.js');
+  fs.writeFileSync(path.join(root, 'src', 'a.js'), 'a\r\nb\r\n');
+  assert.equal(fileHash(root, 'src/a.js'), lf);
+  fs.writeFileSync(path.join(root, 'src', 'a.js'), 'a\nc\n');
+  assert.notEqual(fileHash(root, 'src/a.js'), lf);
+  assert.equal(fileHash(root, 'src/missing.js'), null);
+});
+
+test('결정 후 파일이 그대로면 재검토를 요청하지 않고, 바뀌면 요청한다', () => {
+  const root = rootWithSource();
+  const hashOf = (file) => fileHash(root, file);
+  const ledger = loadLedger(root);
+  apply(ledger, results({ violations: [viol()] }), hashOf);
+  saveLedger(root, ledger);
+  decide(root, ledger, VIOL_ID, 'intended', '의도된 설계', '2026-10-11');
+
+  const same = apply(ledger, results({ commit: 'c2', violations: [viol()] }), hashOf);
+  assert.equal(ledger.findings[0].status, 'intended');
+  assert.deepEqual(same.decided, [VIOL_ID]);
+  assert.deepEqual(same.reopenRequested, []);
+  assert.deepEqual(same.stillOpen, []);
+  assert.deepEqual(same.new, []);
+
+  fs.writeFileSync(path.join(root, 'src', 'a.js'), 'function foo() { changed(); }\n');
+  const changed = apply(ledger, results({ commit: 'c3', violations: [viol()] }), hashOf);
+  assert.equal(ledger.findings[0].status, 'reopen-requested');
+  assert.deepEqual(changed.reopenRequested, [VIOL_ID]);
+  assert.deepEqual(changed.decided, []);
+});
+
+test('keep 은 현재 코드 기준으로 결정을 다시 고정하고, reopen 은 고정을 푼다', () => {
+  const root = rootWithSource();
+  const hashOf = (file) => fileHash(root, file);
+  const ledger = loadLedger(root);
+  apply(ledger, results({ violations: [viol()] }), hashOf);
+  saveLedger(root, ledger);
+  decide(root, ledger, VIOL_ID, 'rejected', '틀린 지적', '2026-10-11');
+  fs.writeFileSync(path.join(root, 'src', 'a.js'), 'function foo() { changed(); }\n');
+  apply(ledger, results({ commit: 'c2', violations: [viol()] }), hashOf);
+
+  decide(root, ledger, VIOL_ID, 'keep', '바뀐 코드에서도 유지', '2026-10-11');
+  const afterKeep = apply(ledger, results({ commit: 'c3', violations: [viol()] }), hashOf);
+  assert.equal(ledger.findings[0].status, 'rejected');
+  assert.deepEqual(afterKeep.decided, [VIOL_ID]);
+
+  fs.writeFileSync(path.join(root, 'src', 'a.js'), 'function foo() { again(); }\n');
+  apply(ledger, results({ commit: 'c4', violations: [viol()] }), hashOf);
+  decide(root, ledger, VIOL_ID, 'reopen', '다시 본다', '2026-10-11');
+  assert.equal(ledger.findings[0].status, 'open');
+  assert.equal('decidedHash' in ledger.findings[0], false);
+});
+
+test('CLI: 결정 후 같은 위반을 다시 apply 해도 상태가 유지된다', () => {
+  const root = tmpDir();
+  cli(root, 'init');
+  fs.mkdirSync(path.join(root, 'src'));
+  fs.writeFileSync(path.join(root, 'src', 'a.js'), 'function foo() {}\n');
+  const input = path.join(root, '.review', 'results.tmp');
+  fs.writeFileSync(input, JSON.stringify(results({ violations: [viol()] })));
+  cli(root, 'apply', input);
+  cli(root, 'decide', VIOL_ID, 'intended', '--reason', '의도된 설계');
+
+  const again = JSON.parse(cli(root, 'apply', input).stdout);
+  assert.deepEqual(again.decided, [VIOL_ID]);
+  assert.deepEqual(again.reopenRequested, []);
+  assert.equal(JSON.parse(cli(root, 'list').stdout)[0].status, 'intended');
 });
