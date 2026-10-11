@@ -610,3 +610,31 @@ test('CLI: 판정 실패는 종료 코드 0, 잘못된 호출은 1', () => {
   assert.equal(aborted.code, 0);
   assert.equal(JSON.parse(aborted.stdout).aborted, true);
 });
+
+test('문서: fixer 와 두 스킬의 frontmatter, 필요한 명령과 지침이 있다', () => {
+  const read = (rel) => fs.readFileSync(fileURLToPath(new URL(`../${rel}`, import.meta.url)), 'utf8');
+
+  const fixer = read('agents/fixer.md');
+  assert.match(fixer, /^---\nname: fixer\ndescription: \S/);
+  assert.match(fixer, /^tools: Read, Grep, Glob, Edit, Write$/m);
+
+  const config = read('skills/review-config/SKILL.md');
+  assert.match(config, /^---\nname: review-config\ndescription: \S/);
+  assert.match(config, /^disable-model-invocation: true$/m);
+  assert.match(config, /fix\.mjs" config set/);
+
+  const fix = read('skills/review-fix/SKILL.md');
+  assert.match(fix, /^---\nname: review-fix\ndescription: \S/);
+  assert.match(fix, /^disable-model-invocation: true$/m);
+  for (const cmd of ['start', 'stage red', 'stage fixed', 'finish', 'abort']) {
+    assert.ok(fix.includes(`fix.mjs" ${cmd}`), `review-fix: ${cmd} 명령이 없습니다`);
+  }
+  for (const agent of ['anetos-review:fixer', 'anetos-review:verifier']) {
+    assert.ok(fix.includes(agent), `review-fix: ${agent} 호출이 없습니다`);
+  }
+
+  assert.match(read('skills/review/SKILL.md'), /고쳐진 지적/);
+  for (const agent of ['rule-checker', 'explorer']) {
+    assert.match(read(`agents/${agent}.md`), /고쳐진 지적의 수정을 되돌리자는 지적은 내지 않는다/);
+  }
+});

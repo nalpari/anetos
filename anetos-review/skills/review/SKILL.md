@@ -75,7 +75,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" list --status open
 - 범위 파일이 10개 이하이면 `anetos-review:rule-checker` 하나를 띄운다.
 - 10개를 넘으면 디렉터리가 같은 파일끼리 묶어 10개 이하의 묶음으로 나누고, 묶음마다 하나씩 병렬로 띄운다.
 
-넘기는 내용: 적용되는 규칙의 ID·제목·설명·위반 예, 담당 파일 목록, 담당 파일의 기존 지적 목록(`id`, `source`, `symbol`, `title`).
+넘기는 내용: 적용되는 규칙의 ID·제목·설명·위반 예, 담당 파일 목록, 담당 파일의 기존 지적 목록(`id`, `source`, `symbol`, `title`), 그리고 고쳐진 지적 목록.
+
+**고쳐진 지적**은 기존 지적 중 `status` 가 `resolved` 이고 `fixLevel` 이 있는 것이다. `review-fix` 로 고쳐서 해결된 지적이다. `id`, `symbol`, `title` 을 "고쳐진 지적"이라고 표시해 따로 넘긴다. 에이전트가 그 수정을 되돌리자는 지적을 내지 않게 하기 위해서다.
 
 반환에서 `verdict` 가 `violation` 인 항목만 `violations` 에 넣는다. `ruleId` 를 `source` 로 옮긴다.
 
@@ -87,7 +89,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" list --status open
 
 `anetos-review:explorer` 를 **하나만** 띄운다. 범위가 커도 나누지 않는다.
 
-넘기는 내용: 범위 파일 목록, 규칙의 ID 와 제목 목록, 범위의 기존 지적 목록(`id`, `source`, `symbol`, `title`, `status`).
+넘기는 내용: 범위 파일 목록, 규칙의 ID 와 제목 목록, 범위의 기존 지적 목록(`id`, `source`, `symbol`, `title`, `status`), 그리고 4단계와 같은 고쳐진 지적 목록.
 
 ## 6. 후보 검증
 
