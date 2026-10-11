@@ -10,6 +10,7 @@ import {
   validateConfig, loadConfig, saveConfig, globToRegExp, isTestPath,
   runCheck, compare,
   start, abort,
+  stageRed, stageFixed,
 } from './fix.mjs';
 
 const PLUGIN_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -310,4 +311,164 @@ test('abort: 진행 중인 수정이 없으면 아무것도 하지 않는다', (
     fs.readFileSync(path.join(root, 'src', 'a.js'), 'utf8'),
     'function foo() { 사용자가 고치는 중 }\n',
   );
+});
+
+// test/a.test.js 에 LINTERR 가 있으면 실패하는 정적 검사.
+const LINT = helper(
+  'lint.js',
+  "const fs=require('fs');const f='test/a.test.js';process.exit(fs.existsSync(f)&&fs.readFileSync(f,'utf8').includes('LINTERR')?1:0);",
+);
+
+const fixSource = (root) => write(root, 'src/a.js', 'function foo() { FIXED }\n');
+const verdictOf = (result, name) => result.verdicts.find((v) => v.name === name).verdict;
+
+test('stageRed: 재현 테스트가 실패하면 통과하고 테스트 해시를 기록한다', () => {
+  const root = makeRepo();
+  start(root, FID);
+  write(root, 'test/a.test.js', 'REPRO\n');
+  const result = stageRed(root, true);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.reasons, []);
+  assert.equal(verdictOf(result, 'test'), 'regressed');
+  const state = readStateFile(root);
+  assert.equal(state.stage, 'red');
+  assert.equal(state.repro, true);
+  assert.deepEqual(Object.keys(state.testHashes), ['test/a.test.js']);
+});
+
+test('stageRed: 재현한다던 테스트가 실패하지 않거나 정적 검사를 깨면 통과하지 못한다', () => {
+  const root = makeRepo({
+    checks: [
+      { name: 'test', kind: 'test', command: SUITE },
+      { name: 'lint', kind: 'static', command: LINT },
+    ],
+  });
+  start(root, FID);
+  write(root, 'test/a.test.js', '재현하지 못하는 테스트\n');
+  const notFailing = stageRed(root, true);
+  assert.equal(notFailing.ok, false);
+  assert.deepEqual(notFailing.reasons, ['repro-not-failing']);
+  assert.equal(readStateFile(root).stage, 'started');
+
+  write(root, 'test/a.test.js', 'REPRO LINTERR\n');
+  assert.deepEqual(stageRed(root, true).reasons, ['static-regression']);
+});
+
+test('stageRed: 재현 테스트가 없다고 했는데 테스트가 깨지면 통과하지 못한다', () => {
+  const root = makeRepo();
+  start(root, FID);
+  write(root, 'test/a.test.js', 'REPRO\n');
+  const result = stageRed(root, false);
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.reasons, ['unexpected-regression']);
+});
+
+test('stageRed: 테스트 단계에서 제품 코드를 건드리면 통과하지 못한다', () => {
+  const root = makeRepo();
+  start(root, FID);
+  fixSource(root);
+  assert.deepEqual(stageRed(root, false).reasons, ['non-test-file-changed']);
+});
+
+test('stage: 단계를 건너뛰면 LedgerError', () => {
+  const root = makeRepo();
+  assert.throws(() => stageRed(root, false), /건너뛸 수 없습니다/);
+  assert.throws(() => stageFixed(root, 'absent'), /건너뛸 수 없습니다/);
+  start(root, FID);
+  assert.throws(() => stageFixed(root, 'absent'), /건너뛸 수 없습니다/);
+});
+
+test('stageFixed: 재현 테스트가 빨강에서 초록이 되면 reproduced', () => {
+  const root = makeRepo();
+  start(root, FID);
+  write(root, 'test/a.test.js', 'REPRO\n');
+  stageRed(root, true);
+  fixSource(root);
+  const result = stageFixed(root, 'absent');
+  assert.deepEqual(
+    { ok: result.ok, reasons: result.reasons, level: result.level, outOfScope: result.outOfScope },
+    { ok: true, reasons: [], level: 'reproduced', outOfScope: [] },
+  );
+  assert.equal(readStateFile(root).stage, 'fixed');
+});
+
+test('stageFixed: 재현 테스트 없이 검사가 통과하면 guarded', () => {
+  const root = makeRepo();
+  start(root, FID);
+  stageRed(root, false);
+  fixSource(root);
+  const result = stageFixed(root, 'absent');
+  assert.equal(result.ok, true);
+  assert.equal(result.level, 'guarded');
+});
+
+test('stageFixed: 가려지지 않은 검사가 없으면 unverified', () => {
+  for (const checks of [[{ name: 'test', kind: 'test', command: FAIL }], []]) {
+    const root = makeRepo({ checks });
+    start(root, FID);
+    assert.equal(stageRed(root, false).ok, true);
+    fixSource(root);
+    const result = stageFixed(root, 'absent');
+    assert.equal(result.ok, true);
+    assert.equal(result.level, 'unverified');
+  }
+});
+
+test('stageFixed: 회귀가 있으면 통과하지 못하고 출력 끝부분을 돌려준다', () => {
+  const root = makeRepo();
+  start(root, FID);
+  stageRed(root, false);
+  write(root, 'src/a.js', 'function foo() { BROKEN }\n');
+  const result = stageFixed(root, 'absent');
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.reasons, ['regression']);
+  assert.match(result.verdicts[0].tail, /suite ran/);
+  assert.equal(readStateFile(root).stage, 'red');
+
+  fixSource(root);
+  assert.equal(stageFixed(root, 'absent').ok, true);
+});
+
+test('stageFixed: 지적이 남아 있으면 통과하지 못한다', () => {
+  const root = makeRepo();
+  start(root, FID);
+  stageRed(root, false);
+  fixSource(root);
+  assert.deepEqual(stageFixed(root, 'present').reasons, ['finding-present']);
+});
+
+test('stageFixed: 대상 파일과 테스트 밖의 변경을 범위 밖으로 알린다', () => {
+  const root = makeRepo();
+  start(root, FID);
+  write(root, 'test/a.test.js', 'REPRO\n');
+  stageRed(root, true);
+  fixSource(root);
+  write(root, 'src/b.js', '호출부\n');
+  write(root, 'docs/새 문서.md', '문서\n');
+  const result = stageFixed(root, 'absent');
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.outOfScope.sort(), ['docs/새 문서.md', 'src/b.js']);
+});
+
+test('stageFixed: 수정 단계에서 테스트를 고치면 통과하지 못한다', () => {
+  const root = makeRepo();
+  start(root, FID);
+  write(root, 'test/a.test.js', 'REPRO\n');
+  stageRed(root, true);
+  write(root, 'test/a.test.js', '통과하도록 고친 테스트\n');
+  assert.deepEqual(stageFixed(root, 'absent').reasons, ['tests-changed']);
+});
+
+test('회귀로 나온 검사가 다시 실행해서 통과하면 flaky 이고 회귀로 세지 않는다', () => {
+  // 실행할 때마다 횟수를 세고, 두 번째 실행에서만 실패한다.
+  const counter = path.join(tmpDir(), 'count');
+  const flaky = `${helper(
+    'flaky.js',
+    "const fs=require('fs');const f=process.argv[2];const n=fs.existsSync(f)?Number(fs.readFileSync(f,'utf8')):0;fs.writeFileSync(f,String(n+1));process.exit(n===1?1:0);",
+  )} "${counter}"`;
+  const root = makeRepo({ checks: [{ name: 'test', kind: 'test', command: flaky }] });
+  start(root, FID);
+  const result = stageRed(root, false);
+  assert.equal(verdictOf(result, 'test'), 'flaky');
+  assert.equal(result.ok, true);
 });

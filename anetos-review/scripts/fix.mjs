@@ -255,3 +255,69 @@ export function abort(root) {
   fs.rmSync(statePath(root), { force: true });
   return { aborted: true, id: state.id, fixAttempts: finding?.fixAttempts ?? 0 };
 }
+
+// 기준선과 비교하고, 회귀로 나온 검사는 한 번 다시 실행해 불안정한 검사를 가려낸다.
+function evaluate(root, cfg, baseline) {
+  return compare(baseline, runChecks(root, cfg)).map((v) => {
+    if (v.verdict !== 'regressed') return v;
+    const again = runCheck(root, cfg.checks.find((c) => c.name === v.name));
+    return again.result === 'pass' ? { ...v, verdict: 'flaky' } : v;
+  });
+}
+
+function brief(verdicts) {
+  return verdicts.map((v) =>
+    v.verdict === 'regressed' ? v : { name: v.name, kind: v.kind, verdict: v.verdict },
+  );
+}
+
+export function stageRed(root, repro) {
+  const state = requireState(root, ['started', 'red']);
+  const cfg = loadConfig(root);
+  const verdicts = evaluate(root, cfg, state.baseline);
+  const changed = changedSince(root, state);
+  const regressed = verdicts.filter((v) => v.verdict === 'regressed');
+  const testRegressed = regressed.some((v) => v.kind === 'test');
+
+  const reasons = [];
+  if (changed.some((file) => !isTestPath(cfg, file))) reasons.push('non-test-file-changed');
+  if (regressed.some((v) => v.kind === 'static')) reasons.push('static-regression');
+  if (repro && !testRegressed) reasons.push('repro-not-failing');
+  if (!repro && testRegressed) reasons.push('unexpected-regression');
+
+  const ok = reasons.length === 0;
+  if (ok) {
+    state.stage = 'red';
+    state.repro = repro;
+    state.testHashes = Object.fromEntries(changed.map((file) => [file, fileHash(root, file)]));
+    writeState(root, state);
+  }
+  return { ok, reasons, verdicts: brief(verdicts) };
+}
+
+export function stageFixed(root, recheck) {
+  const state = requireState(root, ['red', 'fixed']);
+  const cfg = loadConfig(root);
+  const target = loadLedger(root).findings.find((f) => f.id === state.id)?.file;
+  const verdicts = evaluate(root, cfg, state.baseline);
+
+  const reasons = [];
+  if (verdicts.some((v) => v.verdict === 'regressed')) reasons.push('regression');
+  if (recheck !== 'absent') reasons.push('finding-present');
+  if (Object.entries(state.testHashes).some(([file, hash]) => fileHash(root, file) !== hash)) {
+    reasons.push('tests-changed');
+  }
+
+  const outOfScope = changedSince(root, state).filter(
+    (file) => file !== target && !isTestPath(cfg, file),
+  );
+  const level = state.repro
+    ? 'reproduced'
+    : verdicts.some((v) => v.verdict !== 'masked') ? 'guarded' : 'unverified';
+
+  const ok = reasons.length === 0;
+  state.stage = ok ? 'fixed' : 'red';
+  state.result = { ok, level, outOfScope };
+  writeState(root, state);
+  return { ok, reasons, level, outOfScope, verdicts: brief(verdicts) };
+}
