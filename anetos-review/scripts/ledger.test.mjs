@@ -474,3 +474,15 @@ test('rules/default.md: 규칙 10개가 형식에 맞고 ID 가 겹치지 않는
     assert.match(section, /^- 위반 예: \S/m);
   }
 });
+
+test('agents: 세 에이전트가 읽기 전용 도구만 갖는다', () => {
+  for (const name of ['rule-checker', 'explorer', 'verifier']) {
+    const file = fileURLToPath(new URL(`../agents/${name}.md`, import.meta.url));
+    const text = fs.readFileSync(file, 'utf8');
+    const front = text.match(/^---\n([\s\S]*?)\n---\n/)?.[1];
+    assert.ok(front, `${name}: frontmatter 가 없습니다`);
+    assert.match(front, new RegExp(`^name: ${name}$`, 'm'));
+    assert.match(front, /^description: \S/m);
+    assert.match(front, /^tools: Read, Grep, Glob$/m);
+  }
+});
