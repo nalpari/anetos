@@ -321,3 +321,100 @@ export function stageFixed(root, recheck) {
   writeState(root, state);
   return { ok, reasons, level, outOfScope, verdicts: brief(verdicts) };
 }
+
+export function finish(root, { allowUnverified = false, allowOutOfScope = false } = {}) {
+  const state = requireState(root, ['fixed']);
+  if (!state.result?.ok) throw new LedgerError('단계를 건너뛸 수 없습니다. 통과한 stage fixed 가 없습니다.');
+  const { level, outOfScope } = state.result;
+  if (level === 'unverified' && !allowUnverified) {
+    throw new LedgerError('검증 불가 수정입니다. 사용자가 승인한 경우에만 --allow-unverified 로 마무리하세요.');
+  }
+  if (outOfScope.length && !allowOutOfScope) {
+    throw new LedgerError(
+      `범위 밖 파일이 바뀌었습니다: ${outOfScope.join(', ')}. 사용자가 승인한 경우에만 --allow-out-of-scope 로 마무리하세요.`,
+    );
+  }
+
+  const ledger = loadLedger(root);
+  const finding = ledger.findings.find((f) => f.id === state.id);
+  if (!finding || finding.status !== 'open') {
+    throw new LedgerError(`${state.id} 가 원장에서 open 상태가 아닙니다.`);
+  }
+  const changed = changedSince(root, state);
+  const ledgerFile = path.join(root, DIR, 'findings.json');
+  const previous = fs.readFileSync(ledgerFile, 'utf8');
+
+  finding.status = 'resolved';
+  finding.fixLevel = level;
+  saveLedger(root, ledger);
+
+  const title = finding.title.replace(/\s+/g, ' ').trim();
+  try {
+    git(root, ['add', '-A', '--', ...changed, DIR]);
+    // 상태 파일은 .review/.gitignore 가 걸러 주지만, 그 파일이 없는 저장소에서도 커밋되지 않게 한다.
+    git(root, ['rm', '--cached', '-q', '--ignore-unmatch', '--', `${DIR}/fix.tmp`]);
+    git(root, ['commit', '-q', '-m', `fix(review): ${title} [${finding.id}]`]);
+  } catch (e) {
+    // 커밋 훅 실패 등. 원장과 스테이징만 되돌리고 작업 트리는 남겨 원인을 볼 수 있게 한다.
+    fs.writeFileSync(ledgerFile, previous);
+    spawnSync('git', ['reset', '-q'], { cwd: root });
+    throw e;
+  }
+  fs.rmSync(statePath(root), { force: true });
+  return { id: finding.id, level, commit: git(root, ['rev-parse', '--short', 'HEAD']).trim() };
+}
+
+const USAGE =
+  '사용법: fix.mjs <config show | config set <파일> | start <ID> | stage red --repro <yes|no> | stage fixed --recheck <absent|present> | finish [--allow-unverified] [--allow-out-of-scope] | abort>';
+
+function main(argv) {
+  const root = process.cwd();
+  const out = (value) => console.log(JSON.stringify(value, null, 2));
+  const option = (name) => {
+    const i = argv.indexOf(name);
+    return i === -1 ? undefined : argv[i + 1];
+  };
+  const [cmd, sub, arg] = argv;
+
+  if (cmd === 'config' && sub === 'show') return out(loadConfig(root));
+  if (cmd === 'config' && sub === 'set' && arg) {
+    let cfg;
+    try {
+      cfg = JSON.parse(fs.readFileSync(arg, 'utf8').replace(/^﻿/, ''));
+    } catch (e) {
+      throw new LedgerError(`설정 파일을 읽을 수 없습니다: ${e.message}`);
+    }
+    return out(saveConfig(root, cfg));
+  }
+  if (cmd === 'start' && sub) return out(start(root, sub, (line) => console.error(line)));
+  if (cmd === 'stage' && sub === 'red') {
+    const repro = option('--repro');
+    if (repro !== 'yes' && repro !== 'no') throw new LedgerError(USAGE);
+    return out(stageRed(root, repro === 'yes'));
+  }
+  if (cmd === 'stage' && sub === 'fixed') {
+    const recheck = option('--recheck');
+    if (recheck !== 'absent' && recheck !== 'present') throw new LedgerError(USAGE);
+    return out(stageFixed(root, recheck));
+  }
+  if (cmd === 'finish') {
+    return out(
+      finish(root, {
+        allowUnverified: argv.includes('--allow-unverified'),
+        allowOutOfScope: argv.includes('--allow-out-of-scope'),
+      }),
+    );
+  }
+  if (cmd === 'abort') return out(abort(root));
+  throw new LedgerError(USAGE);
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main(process.argv.slice(2));
+  } catch (e) {
+    if (!(e instanceof LedgerError)) throw e;
+    console.error(e.message);
+    process.exit(1);
+  }
+}

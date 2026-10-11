@@ -1369,7 +1369,9 @@ export function finish(root, { allowUnverified = false, allowOutOfScope = false 
 
   const title = finding.title.replace(/\s+/g, ' ').trim();
   try {
-    git(root, ['add', '-A', '--', ...changed, DIR, `:(exclude)${DIR}/fix.tmp`]);
+    git(root, ['add', '-A', '--', ...changed, DIR]);
+    // 상태 파일은 .review/.gitignore 가 걸러 주지만, 그 파일이 없는 저장소에서도 커밋되지 않게 한다.
+    git(root, ['rm', '--cached', '-q', '--ignore-unmatch', '--', `${DIR}/fix.tmp`]);
     git(root, ['commit', '-q', '-m', `fix(review): ${title} [${finding.id}]`]);
   } catch (e) {
     // 커밋 훅 실패 등. 원장과 스테이징만 되돌리고 작업 트리는 남겨 원인을 볼 수 있게 한다.

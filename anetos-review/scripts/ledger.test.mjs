@@ -638,3 +638,14 @@ test('CLI: 결정 후 같은 위반을 다시 apply 해도 상태가 유지된�
   assert.deepEqual(again.reopenRequested, []);
   assert.equal(JSON.parse(cli(root, 'list').stdout)[0].status, 'intended');
 });
+
+test('apply: 고쳐서 해결된 지적이 재발하면 fixLevel 을 지운다', () => {
+  const ledger = emptyLedger();
+  apply(ledger, results({ violations: [viol()] }));
+  ledger.findings[0].status = 'resolved';
+  ledger.findings[0].fixLevel = 'reproduced';
+  const summary = apply(ledger, results({ commit: 'c2', violations: [viol()] }));
+  assert.deepEqual(summary.recurred, [VIOL_ID]);
+  assert.equal(ledger.findings[0].status, 'open');
+  assert.equal('fixLevel' in ledger.findings[0], false);
+});

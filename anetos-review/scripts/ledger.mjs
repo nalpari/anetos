@@ -210,6 +210,7 @@ export function apply(ledger, results, hashOf = () => null) {
       if (!summary.new.has(h.id) && !summary.recurred.has(h.id)) summary.stillOpen.add(h.id);
     } else if (f.status === 'resolved') {
       f.status = 'open';
+      delete f.fixLevel;
       summary.recurred.add(h.id);
     } else if (f.status === 'intended' || f.status === 'rejected') {
       // 결정 이후 파일이 그대로면 같은 논의를 다시 꺼내지 않는다.

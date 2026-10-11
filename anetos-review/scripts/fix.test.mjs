@@ -11,6 +11,7 @@ import {
   runCheck, compare,
   start, abort,
   stageRed, stageFixed,
+  finish,
 } from './fix.mjs';
 
 const PLUGIN_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -471,4 +472,141 @@ test('회귀로 나온 검사가 다시 실행해서 통과하면 flaky 이고 �
   const result = stageRed(root, false);
   assert.equal(verdictOf(result, 'test'), 'flaky');
   assert.equal(result.ok, true);
+});
+
+function toFixed(root, { repro = true } = {}) {
+  start(root, FID);
+  if (repro) write(root, 'test/a.test.js', 'REPRO\n');
+  stageRed(root, repro);
+  fixSource(root);
+  return stageFixed(root, 'absent');
+}
+
+test('finish: 원장을 고치고 지적 ID 를 담아 한 커밋으로 만든다', () => {
+  const root = makeRepo({ title: '이름에 "따옴표"와 $변수,\n줄바꿈이 있는 제목' });
+  toFixed(root);
+  const result = finish(root);
+  assert.equal(result.id, FID);
+  assert.equal(result.level, 'reproduced');
+  assert.equal(result.commit, g(root, 'rev-parse', '--short', 'HEAD').trim());
+
+  assert.equal(
+    g(root, 'log', '-1', '--format=%B').trim(),
+    `fix(review): 이름에 "따옴표"와 $변수, 줄바꿈이 있는 제목 [${FID}]`,
+  );
+  assert.deepEqual(
+    g(root, '-c', 'core.quotepath=false', 'show', '--name-only', '--format=', 'HEAD').trim().split('\n').sort(),
+    ['.review/findings.json', 'src/a.js', 'test/a.test.js'],
+  );
+  const finding = loadLedger(root).findings[0];
+  assert.equal(finding.status, 'resolved');
+  assert.equal(finding.fixLevel, 'reproduced');
+  assert.equal(g(root, 'status', '--porcelain'), '');
+  assert.equal(fs.existsSync(path.join(root, '.review', 'fix.tmp')), false);
+});
+
+test('finish: 통과한 stage fixed 가 없으면 LedgerError', () => {
+  const root = makeRepo();
+  assert.throws(() => finish(root), /건너뛸 수 없습니다/);
+  start(root, FID);
+  assert.throws(() => finish(root), /건너뛸 수 없습니다/);
+  stageRed(root, false);
+  write(root, 'src/a.js', 'function foo() { BROKEN }\n');
+  stageFixed(root, 'absent');
+  assert.throws(() => finish(root), /건너뛸 수 없습니다/);
+  assert.equal(loadLedger(root).findings[0].status, 'open');
+});
+
+test('finish: unverified 는 승인 플래그가 있어야 커밋된다', () => {
+  const root = makeRepo({ checks: [] });
+  assert.equal(toFixed(root, { repro: false }).level, 'unverified');
+  assert.throws(() => finish(root), /allow-unverified/);
+  assert.equal(loadLedger(root).findings[0].status, 'open');
+  assert.equal(finish(root, { allowUnverified: true }).level, 'unverified');
+  assert.equal(loadLedger(root).findings[0].fixLevel, 'unverified');
+});
+
+test('finish: 범위 밖 파일은 승인 플래그가 있어야 커밋된다', () => {
+  const root = makeRepo();
+  start(root, FID);
+  write(root, 'test/a.test.js', 'REPRO\n');
+  stageRed(root, true);
+  fixSource(root);
+  write(root, 'src/b.js', '호출부\n');
+  stageFixed(root, 'absent');
+  assert.throws(() => finish(root), /allow-out-of-scope/);
+  finish(root, { allowOutOfScope: true });
+  assert.ok(g(root, 'show', '--name-only', '--format=', 'HEAD').includes('src/b.js'));
+});
+
+test('finish: 커밋이 실패하면 원장을 되돌리고 작업 트리와 상태는 남긴다', () => {
+  const root = makeRepo();
+  toFixed(root);
+  const hook = path.join(root, '.git', 'hooks', 'pre-commit');
+  fs.writeFileSync(hook, '#!/bin/sh\nexit 1\n');
+  fs.chmodSync(hook, 0o755);
+  const head = g(root, 'rev-parse', 'HEAD');
+
+  assert.throws(() => finish(root), LedgerError);
+  assert.equal(g(root, 'rev-parse', 'HEAD'), head);
+  assert.equal(loadLedger(root).findings[0].status, 'open');
+  assert.equal('fixLevel' in loadLedger(root).findings[0], false);
+  assert.equal(g(root, 'diff', '--cached', '--name-only'), '');
+  assert.equal(fs.readFileSync(path.join(root, 'src', 'a.js'), 'utf8'), 'function foo() { FIXED }\n');
+  assert.equal(readStateFile(root).stage, 'fixed');
+
+  fs.rmSync(hook);
+  assert.equal(finish(root).level, 'reproduced');
+});
+
+const FIX_SCRIPT = fileURLToPath(new URL('./fix.mjs', import.meta.url));
+
+function cli(cwd, ...args) {
+  const r = spawnSync(process.execPath, [FIX_SCRIPT, ...args], { cwd, encoding: 'utf8' });
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+}
+
+test('CLI: start 부터 finish 까지 이어서 동작한다', () => {
+  const root = makeRepo();
+  assert.equal(JSON.parse(cli(root, 'config', 'show').stdout).version, 1);
+
+  const started = cli(root, 'start', FID);
+  assert.equal(started.code, 0);
+  assert.match(started.stderr, /검사 실행: test/);
+  assert.deepEqual(JSON.parse(started.stdout).masked, []);
+
+  write(root, 'test/a.test.js', 'REPRO\n');
+  assert.equal(JSON.parse(cli(root, 'stage', 'red', '--repro', 'yes').stdout).ok, true);
+  fixSource(root);
+  const fixed = JSON.parse(cli(root, 'stage', 'fixed', '--recheck', 'absent').stdout);
+  assert.equal(fixed.level, 'reproduced');
+  const done = cli(root, 'finish');
+  assert.equal(done.code, 0);
+  assert.equal(JSON.parse(done.stdout).id, FID);
+  assert.equal(loadLedger(root).findings[0].status, 'resolved');
+});
+
+test('CLI: 판정 실패는 종료 코드 0, 잘못된 호출은 1', () => {
+  const root = makeRepo();
+  cli(root, 'start', FID);
+  cli(root, 'stage', 'red', '--repro', 'no');
+  const notOk = cli(root, 'stage', 'fixed', '--recheck', 'present');
+  assert.equal(notOk.code, 0);
+  assert.equal(JSON.parse(notOk.stdout).ok, false);
+
+  assert.equal(cli(root, 'stage', 'red').code, 1);
+  assert.equal(cli(root, 'stage', 'fixed', '--recheck', 'maybe').code, 1);
+  assert.equal(cli(root, 'finish').code, 1);
+  assert.equal(cli(root, 'unknown').code, 1);
+  assert.equal(cli(root, 'start').code, 1);
+
+  const bad = path.join(tmpDir(), 'bad.json');
+  fs.writeFileSync(bad, JSON.stringify({ version: 9 }));
+  const rejected = cli(root, 'config', 'set', bad);
+  assert.equal(rejected.code, 1);
+  assert.notEqual(rejected.stderr, '');
+
+  const aborted = cli(root, 'abort');
+  assert.equal(aborted.code, 0);
+  assert.equal(JSON.parse(aborted.stdout).aborted, true);
 });
