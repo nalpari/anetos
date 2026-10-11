@@ -57,7 +57,7 @@
 테스트 실행 명령은 모든 Task에서 같다. `C:\dev\anetos`에서 실행한다.
 
 ```bash
-node --test anetos-review/scripts/
+node --test anetos-review/scripts/ledger.test.mjs
 ```
 
 ---
@@ -179,7 +179,7 @@ test('init: 이미 있으면 아무것도 바꾸지 않는다', () => {
 
 - [ ] **Step 3: 테스트가 실패하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: FAIL. `Cannot find module` 또는 `ledger.mjs`를 찾을 수 없다는 오류.
 
 - [ ] **Step 4: 최소 구현 쓰기**
@@ -228,7 +228,7 @@ export function init(root, pluginRoot) {
 
 - [ ] **Step 5: 테스트가 통과하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: PASS. 5개 통과, 0개 실패.
 
 - [ ] **Step 6: 커밋**
@@ -335,7 +335,7 @@ test('list: 파일과 상태로 거른다', () => {
 
 - [ ] **Step 2: 테스트가 실패하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: FAIL. `loadLedger`를 export하지 않는다는 SyntaxError.
 
 - [ ] **Step 3: 구현 추가**
@@ -384,7 +384,7 @@ export function list(ledger, { files, status } = {}) {
 
 - [ ] **Step 4: 테스트가 통과하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: PASS. 10개 통과, 0개 실패.
 
 - [ ] **Step 5: 커밋**
@@ -635,7 +635,7 @@ test('apply: 오류 메시지가 틀린 항목의 위치를 알려준다', () =>
 
 - [ ] **Step 2: 테스트가 실패하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: FAIL. `apply`를 export하지 않는다는 SyntaxError.
 
 - [ ] **Step 3: 구현 추가**
@@ -777,7 +777,7 @@ export function apply(ledger, results) {
 
 - [ ] **Step 4: 테스트가 통과하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: PASS. 22개 통과, 0개 실패.
 
 - [ ] **Step 5: 커밋**
@@ -983,7 +983,7 @@ test('CLI: 틀린 입력은 종료 코드 1 이고 원장을 건드리지 않는
 
 - [ ] **Step 2: 테스트가 실패하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: FAIL. `decide`를 export하지 않는다는 SyntaxError.
 
 - [ ] **Step 3: 구현 추가**
@@ -1105,7 +1105,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 
 - [ ] **Step 4: 테스트가 통과하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: PASS. 30개 통과, 0개 실패.
 
 - [ ] **Step 5: 커밋**
@@ -1152,7 +1152,7 @@ test('rules/default.md: 규칙 10개가 형식에 맞고 ID 가 겹치지 않는
 
 - [ ] **Step 2: 테스트가 실패하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: FAIL. `1 !== 10`.
 
 - [ ] **Step 3: 규칙 쓰기**
@@ -1217,7 +1217,7 @@ Expected: FAIL. `1 !== 10`.
 
 - [ ] **Step 4: 테스트가 통과하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: PASS. 31개 통과, 0개 실패.
 
 - [ ] **Step 5: 커밋**
@@ -1267,7 +1267,7 @@ test('agents: 세 에이전트가 읽기 전용 도구만 갖는다', () => {
 
 - [ ] **Step 2: 테스트가 실패하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: FAIL. `ENOENT ... agents/rule-checker.md`.
 
 - [ ] **Step 3: rule-checker 쓰기**
@@ -1459,7 +1459,7 @@ tools: Read, Grep, Glob
 
 - [ ] **Step 6: 테스트가 통과하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: PASS. 32개 통과, 0개 실패.
 
 - [ ] **Step 7: 커밋**
@@ -1512,7 +1512,7 @@ test('skills: 두 스킬의 frontmatter 가 맞고 원장을 직접 편집하라
 
 - [ ] **Step 2: 테스트가 실패하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: FAIL. `ENOENT ... skills/review/SKILL.md`.
 
 - [ ] **Step 3: review 스킬 쓰기**
@@ -1715,7 +1715,7 @@ argument-hint: <지적 ID> <intended|rejected|reopen|keep> "이유"
 
 - [ ] **Step 5: 테스트가 통과하는지 확인**
 
-Run: `node --test anetos-review/scripts/`
+Run: `node --test anetos-review/scripts/ledger.test.mjs`
 Expected: PASS. 33개 통과, 0개 실패.
 
 - [ ] **Step 6: 플러그인이 로드되고 스크립트 경로가 풀리는지 확인**
@@ -1952,6 +1952,6 @@ git commit -m "test: fixture 저장소와 수렴 측정 결과 추가"
 
 ## 완료 기준
 
-- `node --test anetos-review/scripts/` 가 33개 통과, 0개 실패로 끝난다.
+- `node --test anetos-review/scripts/ledger.test.mjs` 가 33개 통과, 0개 실패로 끝난다.
 - `claude --plugin-dir C:\dev\anetos\anetos-review` 로 실행한 세션에서 `/anetos-review:review` 와 `/anetos-review:review-decide` 가 동작한다.
 - `anetos-review/fixtures/EXPECTED.md` 의 결과 표에 측정 결과가 한 줄 이상 있고, 네 지표의 달성 여부가 적혀 있다. 미달인 지표가 있으면 사용자에게 보고되어 있다.

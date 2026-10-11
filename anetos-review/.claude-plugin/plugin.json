@@ -1,0 +1,5 @@
+{
+  "name": "anetos-review",
+  "version": "0.1.0",
+  "description": "고정 규칙 검사와 결정 기록으로 실행할수록 결과가 수렴하는 코드 리뷰"
+}
