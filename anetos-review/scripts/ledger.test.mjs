@@ -486,3 +486,22 @@ test('agents: 세 에이전트가 읽기 전용 도구만 갖는다', () => {
     assert.match(front, /^tools: Read, Grep, Glob$/m);
   }
 });
+
+test('skills: 두 스킬의 frontmatter 가 맞고 원장을 직접 편집하라는 지시가 없다', () => {
+  const read = (name) =>
+    fs.readFileSync(fileURLToPath(new URL(`../skills/${name}/SKILL.md`, import.meta.url)), 'utf8');
+
+  const review = read('review');
+  assert.match(review, /^---\nname: review\ndescription: \S/);
+  for (const agent of ['rule-checker', 'explorer', 'verifier']) {
+    assert.ok(review.includes(`anetos-review:${agent}`), `review: ${agent} 호출이 없습니다`);
+  }
+  for (const cmd of ['init', 'list', 'apply']) {
+    assert.match(review, new RegExp(`ledger\\.mjs" ${cmd}`), `review: ${cmd} 명령이 없습니다`);
+  }
+
+  const decide = read('review-decide');
+  assert.match(decide, /^---\nname: review-decide\ndescription: \S/);
+  assert.match(decide, /^disable-model-invocation: true$/m);
+  assert.match(decide, /ledger\.mjs" decide/);
+});

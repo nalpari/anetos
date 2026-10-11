@@ -1729,12 +1729,12 @@ mkdir -p /c/tmp/anetos-smoke && cd /c/tmp/anetos-smoke && git init
 claude --plugin-dir /c/dev/anetos/anetos-review
 ```
 
-세션 안에서 `/anetos-review:review .` 를 실행한다.
+`src/add.js` 처럼 문제없는 작은 소스 파일 하나를 만들어 커밋한 뒤, 세션 안에서 `/anetos-review:review src` 를 실행한다. (범위가 비면 스킬이 `init` 전에 멈추므로 파일이 하나는 있어야 경로 치환을 확인할 수 있다. 실행 중 고친 부분이다.)
 
 Expected:
 - 스킬 목록에 `anetos-review:review` 와 `anetos-review:review-decide` 가 보인다.
 - `ledger.mjs init` 이 성공해 `/c/tmp/anetos-smoke/.review/` 에 `rules.md`, `findings.json`, `decisions.md`, `.gitignore` 가 생긴다.
-- 소스 파일이 없으므로 "리뷰할 변경이 없습니다" 로 끝난다.
+- 지적 없이 끝나고 `findings.json` 의 `findings` 가 비어 있다.
 
 `node` 가 `${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs` 를 찾지 못한다는 오류가 나면 변수가 치환되지 않은 것이다. 그 경우 두 스킬의 모든 `${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs` 를 `${CLAUDE_SKILL_DIR}/../../scripts/ledger.mjs` 로 바꾸고 이 Step을 다시 실행한다. Step 1의 테스트는 `ledger.mjs" <명령>` 부분만 보므로 고칠 필요가 없다. 둘 다 치환되지 않으면 멈추고 사용자에게 보고한다.
 
