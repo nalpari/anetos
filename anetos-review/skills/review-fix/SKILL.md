@@ -64,7 +64,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/fix.mjs" stage red --repro <yes|no>
 
 | reasons | 할 일 |
 |---|---|
-| `repro-not-failing` | 재현 테스트가 문제를 재현하지 못했다. fixer 를 `mode: tests` 로 **한 번** 다시 띄워 `verdicts` 와 함께 넘긴다. 그래도 같으면 재현 테스트를 지우게 하고 `--repro no` 로 다시 실행한다 |
+| `repro-not-failing` | 재현 테스트가 문제를 재현하지 못했다. fixer 를 `mode: tests` 로 **한 번** 다시 띄워 `verdicts` 의 `tail`(검사 출력 끝부분)과 함께 넘긴다. 그래도 같으면 fixer 에게 재현 테스트를 지우라고 요청하고 `--repro no` 로 다시 실행한다 |
 | `unexpected-regression` | 방금 쓴 고정 테스트가 지금 실패한다. fixer 를 `mode: tests` 로 한 번 다시 띄워 실패한 검사의 출력을 넘긴다 |
 | `static-regression` | 테스트 파일이 정적 검사를 깨뜨렸다. fixer 를 한 번 다시 띄워 출력을 넘긴다 |
 | `non-test-file-changed` | fixer 가 제품 코드를 건드렸다. 6단계(중단)로 간다 |
@@ -142,6 +142,10 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/fix.mjs" finish [--allow-unverified] [--allo
 node "${CLAUDE_PLUGIN_ROOT}/scripts/fix.mjs" abort
 ```
 
+결과가 `removedCorruptState: true` 이면 상태 파일이 깨져 있어서 지우기만 한 것이다. 작업 트리는 되돌리지 않았으므로, 남아 있는 변경을 사용자가 직접 확인해야 한다고 알린다.
+
+결과의 `headMoved` 가 참이면 수정을 시작한 뒤에 커밋이 생긴 것이다. 그 커밋은 되돌리지 않았다. 사용자의 커밋일 수 있으므로 어떤 커밋인지 알리기만 한다.
+
 작업 트리가 시작 시점으로 돌아간다. 다만 결과의 `unrestored` 에 파일이 있으면, 그것은 시작 전부터 있던 미추적 파일을 수정이 바꾼 것이다. git 에 원본이 없어 되돌리지 못했으므로 어떤 파일인지 반드시 알린다.
 
 사용자에게 다음을 알린다.
@@ -150,6 +154,10 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/fix.mjs" abort
 - 처리하지 않은 나머지 ID
 
 중단한 지적을 다른 방법으로 다시 시도하지 않는다.
+
+## 보고
+
+한국어로 보고한다. 사용자가 다른 언어로 말했으면 그 언어를 따른다.
 
 ## 하지 않는 것
 

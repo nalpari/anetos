@@ -289,7 +289,7 @@ test('abort: 수정이 만든 변경만 되돌린다', () => {
   write(root, 'src/b.js', 'staged\n');
   g(root, 'add', 'src/b.js');
 
-  assert.deepEqual(abort(root), { aborted: true, id: FID, fixAttempts: 1, unrestored: [] });
+  assert.deepEqual(abort(root), { aborted: true, id: FID, fixAttempts: 1, unrestored: [], headMoved: false });
   assert.deepEqual(statusOutsideReview(root), before);
   assert.equal(fs.readFileSync(path.join(root, 'src', 'a.js'), 'utf8'), 'function foo() {}\n');
   assert.equal(fs.existsSync(path.join(root, 'test', '새 파일.test.js')), false);
@@ -786,4 +786,90 @@ test('runCheck: 제한 시간을 넘긴 검사의 프로세스가 남지 않는�
   assert.equal(r.timedOut, true);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3500);
   assert.equal(fs.existsSync(marker), false);
+});
+
+test('abort: 깨진 상태 파일은 지워서 다시 시작할 수 있게 한다', () => {
+  const root = makeRepo();
+  write(root, '.review/fix.tmp', '{ 깨진 상태');
+  assert.throws(() => start(root, FID), /진행 중인 수정/);
+  assert.deepEqual(abort(root), { aborted: false, removedCorruptState: true });
+  assert.equal(fs.existsSync(path.join(root, '.review', 'fix.tmp')), false);
+  assert.equal(start(root, FID).id, FID);
+});
+
+test('수정 도중 커밋이 생기면 다음 단계를 거부하고 abort 가 알린다', () => {
+  const root = makeRepo();
+  start(root, FID);
+  g(root, 'commit', '-q', '--allow-empty', '-m', '사용자가 도중에 한 커밋');
+  assert.throws(() => stageRed(root, false), /HEAD/);
+  assert.equal(abort(root).headMoved, true);
+});
+
+test('기준선에서 실패하던 검사가 통과로 바뀐 것만으로는 guarded 가 아니다', () => {
+  const needsFixed = helper(
+    'needsfixed.js',
+    "process.exit(require('fs').readFileSync('src/a.js','utf8').includes('FIXED')?0:1);",
+  );
+  const root = makeRepo({ checks: [{ name: 'test', kind: 'test', command: needsFixed }] });
+  assert.deepEqual(start(root, FID).masked, ['test']);
+  stageRed(root, false);
+  fixSource(root);
+  const result = stageFixed(root, 'absent');
+  assert.equal(verdictOf(result, 'test'), 'improved');
+  assert.equal(result.level, 'unverified');
+});
+
+test('start: .review 가 gitignore 에 걸려 있으면 거부한다', () => {
+  const root = makeRepo();
+  g(root, 'rm', '-r', '-q', '--cached', '.review');
+  write(root, '.gitignore', '.review/\n');
+  g(root, 'add', '.gitignore');
+  g(root, 'commit', '-q', '-m', 'ignore review');
+  assert.throws(() => start(root, FID), /gitignore/);
+});
+
+test(
+  '원장의 경로가 대소문자만 다르면 같은 파일로 본다',
+  { skip: process.platform !== 'win32' && process.platform !== 'darwin' },
+  () => {
+    const root = makeRepo();
+    const ledger = loadLedger(root);
+    ledger.findings[0].file = 'src/A.js';
+    saveLedger(root, ledger);
+    g(root, 'commit', '-q', '-am', 'case');
+    start(root, FID);
+    assert.equal(readStateFile(root).target, 'src/a.js');
+    write(root, 'test/a.test.js', 'REPRO\n');
+    stageRed(root, true);
+    fixSource(root);
+    assert.deepEqual(stageFixed(root, 'absent').outOfScope, []);
+  },
+);
+
+test('abort: 수정이 만든 빈 폴더를 남기지 않는다', () => {
+  const root = makeRepo();
+  start(root, FID);
+  write(root, 'test/deep/more/a.test.js', 'REPRO\n');
+  abort(root);
+  assert.equal(fs.existsSync(path.join(root, 'test')), false);
+  assert.equal(fs.existsSync(path.join(root, 'src')), true);
+});
+
+test('단계가 통과하지 못하면 모든 검사의 출력 끝부분을 돌려준다', () => {
+  const root = makeRepo();
+  start(root, FID);
+  write(root, 'test/a.test.js', '재현하지 못하는 테스트\n');
+  const result = stageRed(root, true);
+  assert.deepEqual(result.reasons, ['repro-not-failing']);
+  assert.match(result.verdicts[0].tail, /suite ran/);
+});
+
+test('문서: 남은 지침이 들어 있다', () => {
+  const read = (rel) => fs.readFileSync(fileURLToPath(new URL(`../${rel}`, import.meta.url)), 'utf8');
+  assert.match(read('skills/review-config/SKILL.md'), /cmd\.exe/);
+  assert.match(read('agents/fixer.md'), /재현 테스트를 지우라는 요청/);
+  const fix = read('skills/review-fix/SKILL.md');
+  assert.match(fix, /headMoved/);
+  assert.match(fix, /removedCorruptState/);
+  assert.match(fix, /한국어로 보고/);
 });

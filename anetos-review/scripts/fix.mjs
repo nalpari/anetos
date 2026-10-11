@@ -217,14 +217,23 @@ function readState(root) {
 }
 
 function writeState(root, state) {
-  fs.writeFileSync(statePath(root), JSON.stringify(state, null, 2) + '\n');
+  const file = statePath(root);
+  fs.writeFileSync(`${file}.tmp`, JSON.stringify(state, null, 2) + '\n');
+  fs.renameSync(`${file}.tmp`, file);
 }
+
+const headOf = (root) => git(root, ['rev-parse', 'HEAD']).trim();
 
 function requireState(root, stages) {
   const state = readState(root);
   if (!state || !stages.includes(state.stage)) {
     throw new LedgerError(
       `단계를 건너뛸 수 없습니다. 지금 단계는 ${state?.stage ?? '시작 전'} 이고, ${stages.join(' 또는 ')} 단계여야 합니다.`,
+    );
+  }
+  if (headOf(root) !== state.head) {
+    throw new LedgerError(
+      '수정을 시작한 뒤 커밋이 생겨 HEAD 가 바뀌었습니다. 기준선이 더 이상 맞지 않으니 abort 한 뒤 다시 시작하세요.',
     );
   }
   return state;
@@ -258,9 +267,14 @@ export function start(root, id, log = () => {}) {
   if (fs.existsSync(statePath(root))) {
     throw new LedgerError('진행 중인 수정이 있습니다. 먼저 finish 하거나 abort 하세요.');
   }
-  const head = git(root, ['rev-parse', 'HEAD']).trim();
+  const head = headOf(root);
   if (git(root, ['rev-parse', '--show-prefix']).trim() !== '') {
     throw new LedgerError('git 저장소의 최상위 폴더에서 실행해야 합니다.');
+  }
+  if (spawnSync('git', ['check-ignore', '-q', `${DIR}/findings.json`], { cwd: root }).status === 0) {
+    throw new LedgerError(
+      `${DIR}/ 가 .gitignore 에 걸려 있어 원장을 커밋할 수 없습니다. .gitignore 에서 빼고 ${DIR}/ 를 커밋한 뒤 다시 실행하세요.`,
+    );
   }
   const dirty = workingChanges(root).tracked;
   if (dirty.length) {
@@ -268,7 +282,16 @@ export function start(root, id, log = () => {}) {
       `커밋하지 않은 변경이 있어 시작할 수 없습니다: ${dirty.join(', ')}. 커밋하거나 치워 둔 뒤 다시 실행하세요.`,
     );
   }
-  if (git(root, ['--literal-pathspecs', 'ls-files', '--', finding.file]).trim() === '') {
+  // 대소문자를 구분하지 않는 파일 시스템에서는 원장의 경로와 git 의 경로가 대소문자만 다를 수 있다.
+  // git 이 아는 표기를 대상 경로로 쓴다.
+  const ignoreCase =
+    spawnSync('git', ['config', '--get', 'core.ignorecase'], { cwd: root, encoding: 'utf8' })
+      .stdout.trim() === 'true';
+  const magic = ignoreCase ? ':(icase,literal)' : ':(literal)';
+  const target = git(root, ['ls-files', '-z', '--', `${magic}${finding.file}`])
+    .split('\0')
+    .filter(Boolean)[0];
+  if (!target) {
     throw new LedgerError(
       `${finding.file} 이 git 에 추적되지 않습니다. 되돌릴 기준이 없으므로 먼저 커밋한 뒤 다시 실행하세요.`,
     );
@@ -279,7 +302,7 @@ export function start(root, id, log = () => {}) {
   // 기준선 실행 뒤에 기록해서 검사가 만든 파일도 "원래 있던 것"이 되게 한다.
   // 설정도 여기서 고정한다. 도중에 config.json 이 바뀌어도 판정 기준은 바뀌지 않는다.
   writeState(root, {
-    id, head, config: cfg, known: snapshot(root), baseline,
+    id, head, target, config: cfg, known: snapshot(root), baseline,
     stage: 'started', repro: false, testHashes: {}, result: null,
   });
   return {
@@ -291,17 +314,36 @@ export function start(root, id, log = () => {}) {
 
 export function abort(root) {
   const state = readState(root);
-  if (!state) return { aborted: false };
+  if (!state) {
+    // 읽을 수 없는 상태 파일은 되돌릴 근거가 못 된다. 지워서 다시 시작할 수 있게만 한다.
+    if (!fs.existsSync(statePath(root))) return { aborted: false };
+    fs.rmSync(statePath(root), { force: true });
+    return { aborted: false, removedCorruptState: true };
+  }
 
+  // 도중에 생긴 커밋은 사용자의 것일 수 있으므로 되돌리지 않고 알리기만 한다.
+  const headMoved = headOf(root) !== state.head;
   const exclude = `:(exclude)${DIR}`;
   git(root, ['reset', '-q', '--', '.', exclude]);
   git(root, ['checkout', '--', '.', exclude]);
   // 남은 것은 미추적 파일뿐이다. 수정이 만든 것은 지우고, 원래 있던 파일을 수정이 바꾼 경우는
   // 되돌릴 기준이 없으므로 알리기만 한다.
+  const top = path.resolve(root);
   const unrestored = [];
   for (const [file, hash] of Object.entries(snapshot(root))) {
-    if (!(file in state.known)) fs.rmSync(path.join(root, file), { force: true });
-    else if (state.known[file] !== hash) unrestored.push(file);
+    if (file in state.known) {
+      if (state.known[file] !== hash) unrestored.push(file);
+      continue;
+    }
+    fs.rmSync(path.join(top, file), { force: true });
+    // 파일을 지워서 비게 된 폴더도 지운다. 비어 있지 않으면 rmdir 이 실패하고 거기서 멈춘다.
+    for (let dir = path.dirname(path.join(top, file)); dir !== top; dir = path.dirname(dir)) {
+      try {
+        fs.rmdirSync(dir);
+      } catch {
+        break;
+      }
+    }
   }
 
   const ledger = loadLedger(root);
@@ -311,7 +353,7 @@ export function abort(root) {
     saveLedger(root, ledger);
   }
   fs.rmSync(statePath(root), { force: true });
-  return { aborted: true, id: state.id, fixAttempts: finding?.fixAttempts ?? 0, unrestored };
+  return { aborted: true, id: state.id, fixAttempts: finding?.fixAttempts ?? 0, unrestored, headMoved };
 }
 
 // 기준선과 비교하고, 회귀로 나온 검사는 한 번 다시 실행해 불안정한 검사를 가려낸다.
@@ -354,12 +396,12 @@ export function stageRed(root, repro) {
     state.testHashes = changed;
   }
   writeState(root, state);
-  return { ok, reasons, verdicts: brief(verdicts) };
+  return { ok, reasons, verdicts: ok ? brief(verdicts) : verdicts };
 }
 
 export function stageFixed(root, recheck) {
   const state = requireState(root, ['red', 'fixed']);
-  const target = loadLedger(root).findings.find((f) => f.id === state.id)?.file;
+  const { target } = state;
   const verdicts = evaluate(root, state);
   const changed = changedSince(root, state);
   // 빨강 단계에서 쓴 테스트를 뺀 나머지가 수정 단계에서 바뀐 파일이다.
@@ -377,13 +419,15 @@ export function stageFixed(root, recheck) {
   const outOfScope = fixFiles.filter((file) => file !== target);
   const level = state.repro
     ? 'reproduced'
-    : verdicts.some((v) => v.verdict !== 'masked') ? 'guarded' : 'unverified';
+    : // 기준선에서 통과하던 검사가 지금도 통과해야 회귀가 없다는 근거가 된다.
+      // 기준선에서 실패하던 검사(masked, improved)는 근거가 못 된다.
+      verdicts.some((v) => v.verdict === 'kept' || v.verdict === 'flaky') ? 'guarded' : 'unverified';
 
   const ok = reasons.length === 0;
   state.stage = ok ? 'fixed' : 'red';
   state.result = { ok, level, outOfScope, verified: changed };
   writeState(root, state);
-  return { ok, reasons, level, outOfScope, verdicts: brief(verdicts) };
+  return { ok, reasons, level, outOfScope, verdicts: ok ? brief(verdicts) : verdicts };
 }
 
 const sortedJson = (obj) => JSON.stringify(Object.entries(obj).sort(([a], [b]) => (a < b ? -1 : 1)));
