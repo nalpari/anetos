@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { findingId, init, loadLedger, saveLedger, list, apply, LedgerError } from './ledger.mjs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import {
+  findingId, init, loadLedger, saveLedger, list, apply, decide, LedgerError,
+} from './ledger.mjs';
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-'));
@@ -313,4 +317,146 @@ test('apply: 오류 메시지가 틀린 항목의 위치를 알려준다', () =>
     () => apply(ledger, results({ violations: [viol(), viol({ title: '' })] })),
     /violations\[1\]/,
   );
+});
+
+function rootWith(findings) {
+  const root = initRoot();
+  saveLedger(root, { version: 1, findings });
+  return root;
+}
+
+function decisionsText(root) {
+  return fs.readFileSync(path.join(root, '.review', 'decisions.md'), 'utf8');
+}
+
+test('decide: intended 는 상태를 바꾸고 결정을 기록한다', () => {
+  const root = rootWith([finding({ id: 'F-1' })]);
+  const ledger = loadLedger(root);
+  const result = decide(root, ledger, 'F-1', 'intended', '내부 상수만 넘긴다', '2026-10-11');
+  assert.deepEqual(result, { decisionId: 'D-0001', status: 'intended' });
+  assert.equal(loadLedger(root).findings[0].status, 'intended');
+  assert.equal(loadLedger(root).findings[0].decisionId, 'D-0001');
+  assert.equal(
+    decisionsText(root),
+    '# 결정 기록\n' +
+      '\n## D-0001\n' +
+      '- 날짜: 2026-10-11\n' +
+      '- 지적: F-1\n' +
+      '- 대상: src/a.js foo\n' +
+      '- 결정: intended\n' +
+      '- 이유: 내부 상수만 넘긴다\n',
+  );
+});
+
+test('decide: 결정 번호가 이어진다', () => {
+  const root = rootWith([finding({ id: 'F-1' }), finding({ id: 'F-2' })]);
+  const ledger = loadLedger(root);
+  decide(root, ledger, 'F-1', 'intended', '이유 1', '2026-10-11');
+  const second = decide(root, ledger, 'F-2', 'rejected', '이유 2', '2026-10-11');
+  assert.equal(second.decisionId, 'D-0002');
+});
+
+test('decide: decisions.md 가 CRLF 여도 번호가 이어진다', () => {
+  const root = rootWith([finding({ id: 'F-1' }), finding({ id: 'F-2' })]);
+  const ledger = loadLedger(root);
+  decide(root, ledger, 'F-1', 'intended', '이유 1', '2026-10-11');
+  const file = path.join(root, '.review', 'decisions.md');
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/\n/g, '\r\n'));
+  const second = decide(root, ledger, 'F-2', 'rejected', '이유 2', '2026-10-11');
+  assert.equal(second.decisionId, 'D-0002');
+});
+
+test('decide: 여러 줄 이유는 한 줄로 기록되고 번호를 망가뜨리지 않는다', () => {
+  const root = rootWith([finding({ id: 'F-1' }), finding({ id: 'F-2' })]);
+  const ledger = loadLedger(root);
+  decide(root, ledger, 'F-1', 'intended', '첫 줄\n## D-0099\n셋째 줄', '2026-10-11');
+  assert.match(decisionsText(root), /- 이유: 첫 줄 ## D-0099 셋째 줄\n$/);
+  const second = decide(root, ledger, 'F-2', 'rejected', '이유 2', '2026-10-11');
+  assert.equal(second.decisionId, 'D-0002');
+});
+
+test('decide: reopen 은 open 으로, keep 은 이전 상태로 되돌린다', () => {
+  const root = rootWith([
+    finding({ id: 'F-1', status: 'reopen-requested', previousStatus: 'intended' }),
+    finding({ id: 'F-2', status: 'reopen-requested', previousStatus: 'rejected' }),
+  ]);
+  const ledger = loadLedger(root);
+  assert.equal(decide(root, ledger, 'F-1', 'reopen', '상황이 바뀜', '2026-10-11').status, 'open');
+  assert.equal(decide(root, ledger, 'F-2', 'keep', '그대로 둔다', '2026-10-11').status, 'rejected');
+  const saved = loadLedger(root).findings;
+  assert.equal('previousStatus' in saved[0], false);
+  assert.equal('previousStatus' in saved[1], false);
+});
+
+test('decide: 허용되지 않은 요청은 LedgerError 이고 아무것도 쓰지 않는다', () => {
+  const root = rootWith([
+    finding({ id: 'F-1', status: 'open' }),
+    finding({ id: 'F-2', status: 'resolved' }),
+  ]);
+  const ledger = loadLedger(root);
+  const ledgerBefore = fs.readFileSync(path.join(root, '.review', 'findings.json'), 'utf8');
+  const cases = [
+    ['F-1', 'intended', ''],
+    ['F-1', 'intended', '   '],
+    ['F-1', 'intended', undefined],
+    ['F-1', 'approve', '이유'],
+    ['F-1', 'reopen', '이유'],
+    ['F-1', 'keep', '이유'],
+    ['F-2', 'intended', '이유'],
+    ['F-missing', 'intended', '이유'],
+  ];
+  for (const [id, decision, reason] of cases) {
+    assert.throws(() => decide(root, ledger, id, decision, reason, '2026-10-11'), LedgerError);
+  }
+  assert.equal(fs.readFileSync(path.join(root, '.review', 'findings.json'), 'utf8'), ledgerBefore);
+  assert.equal(decisionsText(root), '# 결정 기록\n');
+});
+
+const SCRIPT = fileURLToPath(new URL('./ledger.mjs', import.meta.url));
+
+function cli(cwd, ...args) {
+  const r = spawnSync(process.execPath, [SCRIPT, ...args], { cwd, encoding: 'utf8' });
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+}
+
+test('CLI: init, apply, list, decide 가 이어서 동작한다', () => {
+  const root = tmpDir();
+  assert.deepEqual(JSON.parse(cli(root, 'init').stdout), { created: true });
+  assert.match(fs.readFileSync(path.join(root, '.review', 'rules.md'), 'utf8'), /^## R-001 /m);
+
+  const input = path.join(root, '.review', 'results.tmp');
+  fs.writeFileSync(input, JSON.stringify(results({ violations: [viol()] })));
+  const applied = cli(root, 'apply', input);
+  assert.equal(applied.code, 0);
+  assert.deepEqual(JSON.parse(applied.stdout).new, [VIOL_ID]);
+
+  const listed = JSON.parse(cli(root, 'list', '--files', 'src/a.js', '--status', 'open').stdout);
+  assert.deepEqual(listed.map((f) => f.id), [VIOL_ID]);
+
+  assert.deepEqual(JSON.parse(cli(root, 'id', 'R-001', 'src/a.js', 'foo').stdout), { id: VIOL_ID });
+
+  const decided = cli(root, 'decide', VIOL_ID, 'intended', '--reason', '의도된 설계');
+  assert.equal(decided.code, 0);
+  assert.equal(JSON.parse(decided.stdout).status, 'intended');
+});
+
+test('CLI: 틀린 입력은 종료 코드 1 이고 원장을 건드리지 않는다', () => {
+  const root = tmpDir();
+  cli(root, 'init');
+  const ledgerFile = path.join(root, '.review', 'findings.json');
+  const before = fs.readFileSync(ledgerFile, 'utf8');
+
+  const input = path.join(root, '.review', 'results.tmp');
+  fs.writeFileSync(input, '{ 깨진 json');
+  const broken = cli(root, 'apply', input);
+  assert.equal(broken.code, 1);
+  assert.notEqual(broken.stderr, '');
+
+  fs.writeFileSync(input, JSON.stringify(results({ violations: [viol({ title: '' })] })));
+  assert.equal(cli(root, 'apply', input).code, 1);
+
+  assert.equal(cli(root, 'decide', 'F-missing', 'intended', '--reason', '이유').code, 1);
+  assert.equal(cli(root, 'unknown').code, 1);
+  assert.equal(cli(tmpDir(), 'list').code, 1);
+  assert.equal(fs.readFileSync(ledgerFile, 'utf8'), before);
 });

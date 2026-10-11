@@ -202,3 +202,112 @@ export function apply(ledger, results) {
 
   return Object.fromEntries(Object.entries(summary).map(([key, ids]) => [key, [...ids]]));
 }
+
+const DECISIONS = {
+  intended: 'open',
+  rejected: 'open',
+  reopen: 'reopen-requested',
+  keep: 'reopen-requested',
+};
+
+export function decide(root, ledger, id, decision, reason, date = new Date().toISOString().slice(0, 10)) {
+  const required = DECISIONS[decision];
+  if (!required) {
+    throw new LedgerError(`알 수 없는 결정입니다: ${decision} (intended, rejected, reopen, keep 중 하나)`);
+  }
+  if (typeof reason !== 'string' || reason.trim() === '') {
+    throw new LedgerError('이유는 필수입니다. --reason "..." 으로 적어 주세요.');
+  }
+  const f = ledger.findings.find((x) => x.id === id);
+  if (!f) throw new LedgerError(`원장에 없는 id 입니다: ${id}`);
+  if (f.status !== required) {
+    throw new LedgerError(
+      `${id} 의 상태가 ${f.status} 이라 ${decision} 결정을 할 수 없습니다 (${required} 상태여야 합니다).`,
+    );
+  }
+
+  const file = path.join(root, DIR, 'decisions.md');
+  const text = fs.readFileSync(file, 'utf8');
+  const numbers = [...text.matchAll(/^## D-(\d+)\s*$/gm)].map((m) => Number(m[1]));
+  const decisionId = `D-${String(Math.max(0, ...numbers) + 1).padStart(4, '0')}`;
+
+  if (decision === 'intended' || decision === 'rejected') {
+    f.status = decision;
+  } else {
+    f.status = decision === 'reopen' ? 'open' : f.previousStatus;
+    delete f.previousStatus;
+  }
+  f.decisionId = decisionId;
+
+  const oneLine = reason.trim().replace(/\s*[\r\n]+\s*/g, ' ');
+  fs.appendFileSync(
+    file,
+    `\n## ${decisionId}\n- 날짜: ${date}\n- 지적: ${id}\n- 대상: ${f.file} ${f.symbol}\n- 결정: ${decision}\n- 이유: ${oneLine}\n`,
+  );
+  saveLedger(root, ledger);
+  return { decisionId, status: f.status };
+}
+
+const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const USAGE = '사용법: ledger.mjs <init | list [--files a,b] [--status s] | id <source> <file> <symbol> | apply <결과 파일> | decide <id> <결정> --reason "...">';
+
+function parseArgs(argv) {
+  const pos = [];
+  const opts = {};
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i].startsWith('--')) opts[argv[i].slice(2)] = argv[++i];
+    else pos.push(argv[i]);
+  }
+  return { pos, opts };
+}
+
+function main(argv) {
+  const [cmd, ...rest] = argv;
+  const { pos, opts } = parseArgs(rest);
+  const root = process.cwd();
+  const out = (value) => console.log(JSON.stringify(value, null, 2));
+
+  switch (cmd) {
+    case 'init':
+      return out(init(root, PLUGIN_ROOT));
+    case 'id':
+      if (pos.length !== 3) throw new LedgerError(USAGE);
+      return out({ id: findingId(pos[0], pos[1], pos[2]) });
+    case 'list':
+      return out(
+        list(loadLedger(root), {
+          files: opts.files?.split(',').filter(Boolean),
+          status: opts.status,
+        }),
+      );
+    case 'apply': {
+      if (pos.length !== 1) throw new LedgerError(USAGE);
+      let results;
+      try {
+        results = JSON.parse(fs.readFileSync(pos[0], 'utf8'));
+      } catch (e) {
+        throw new LedgerError(`결과 파일을 읽을 수 없습니다: ${e.message}`);
+      }
+      const ledger = loadLedger(root);
+      const summary = apply(ledger, results);
+      saveLedger(root, ledger);
+      return out(summary);
+    }
+    case 'decide': {
+      if (pos.length !== 2) throw new LedgerError(USAGE);
+      return out(decide(root, loadLedger(root), pos[0], pos[1], opts.reason));
+    }
+    default:
+      throw new LedgerError(USAGE);
+  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main(process.argv.slice(2));
+  } catch (e) {
+    if (!(e instanceof LedgerError)) throw e;
+    console.error(e.message);
+    process.exit(1);
+  }
+}
