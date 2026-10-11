@@ -22,10 +22,11 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" <명령>
 
   ```bash
   git diff --name-only --diff-filter=d main...HEAD
-  git diff --name-only --diff-filter=d
+  git diff --name-only --diff-filter=d HEAD
+  git ls-files --others --exclude-standard
   ```
 
-  두 결과를 합친다. 커밋된 변경과 아직 커밋하지 않은 변경을 모두 본다.
+  세 결과를 합친다. 커밋된 변경, 스테이징했거나 아직 스테이징하지 않은 변경, 새로 만든 미추적 파일을 모두 본다.
 - git 저장소가 아니거나 기준 브랜치가 없으면 추측하지 말고, 경로를 인자로 달라고 사용자에게 말한 뒤 멈춘다.
 - `.review/` 아래의 파일, 삭제된 파일, 바이너리, 잠금 파일, 생성된 파일(`dist/`, `build/`, `node_modules/`)은 범위에서 뺀다.
 - 범위가 비면 "리뷰할 변경이 없습니다" 라고 말하고 멈춘다.
@@ -58,6 +59,14 @@ id, source, file, symbol, title, evidence
 ```
 
 각 반환 `{ verdict, evidence }` 를 `rechecks` 에 `{ id, verdict, evidence }` 로 모은다.
+
+범위 밖이라도 파일이 사라진 지적은 여기서 정리한다. 삭제되거나 이름이 바뀐 파일은 범위에 들어오지 않으므로, 그대로 두면 그 지적이 영원히 열려 있게 된다.
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" list --status open
+```
+
+결과 중 `file` 이 저장소에 더 이상 없는 지적은 verifier 를 띄우지 않고 `rechecks` 에 `{ id, verdict: "absent", evidence: "" }` 로 넣는다. 파일이 있는 범위 밖 지적은 건드리지 않는다.
 
 ## 4. 규칙 검사
 
@@ -99,7 +108,9 @@ file, symbol, claim, evidence
 
 explorer 가 쓴 다른 설명이나 당신의 의견을 덧붙이지 않는다. 검증은 주장과 코드만으로 이루어져야 한다.
 
-각 후보와 반환을 합쳐 `candidates` 에 넣는다. `claim` 을 `title` 로 옮긴다.
+각 후보와 반환을 합쳐 `candidates` 에 넣는다. `claim` 을 `title` 로 옮긴다. `file`, `symbol`, `evidence` 는 explorer 가 낸 값을 그대로 쓰고, verifier 의 반환에서는 `verdict` 만 가져온다. verifier 가 `unconfirmed` 일 때 `evidence` 를 비워서 돌려줘도 후보의 `evidence` 는 비우지 않는다.
+
+`file` 은 항상 저장소 루트 기준 상대 경로로 적는다. 에이전트가 절대 경로로 돌려줬으면 상대 경로로 바꾼다.
 
 ```json
 { "category": "bug", "file": "...", "symbol": "...", "title": "<claim>", "evidence": "...", "matches": null, "verdict": "confirmed" }

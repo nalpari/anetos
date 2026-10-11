@@ -505,3 +505,59 @@ test('skills: 두 스킬의 frontmatter 가 맞고 원장을 직접 편집하라
   assert.match(decide, /^disable-model-invocation: true$/m);
   assert.match(decide, /ledger\.mjs" decide/);
 });
+
+test('apply: 같은 ID 의 후보는 순서와 상관없이 confirmed 가 이긴다', () => {
+  const ledger = emptyLedger();
+  const summary = apply(
+    ledger,
+    results({ candidates: [cand({ verdict: 'unconfirmed', title: 'A' }), cand({ title: 'B' })] }),
+  );
+  assert.equal(ledger.findings.length, 1);
+  assert.equal(ledger.findings[0].status, 'open');
+  assert.equal(ledger.findings[0].title, 'B');
+  assert.deepEqual(summary.new, [CAND_ID]);
+  assert.deepEqual(summary.dismissed, []);
+});
+
+test('apply: source 나 파일이 다른 지적을 가리키는 matches 는 무시한다', () => {
+  const ledger = emptyLedger();
+  apply(ledger, results({ violations: [viol()] }));
+  const summary = apply(
+    ledger,
+    results({
+      commit: 'c2',
+      violations: [viol({ source: 'R-003', file: 'src/zzz.js', matches: VIOL_ID })],
+    }),
+  );
+  assert.deepEqual(summary.new, [findingId('R-003', 'src/zzz.js', 'foo')]);
+  assert.deepEqual(summary.stillOpen, []);
+  assert.equal(ledger.findings.length, 2);
+});
+
+test('apply: 절대 경로는 형식 오류다', () => {
+  const ledger = emptyLedger();
+  for (const file of ['C:\\repo\\src\\a.js', '/repo/src/a.js']) {
+    assert.throws(() => apply(ledger, results({ violations: [viol({ file })] })), LedgerError);
+  }
+  assert.deepEqual(ledger.findings, []);
+});
+
+test('decide: 원장 저장이 실패하면 decisions.md 에 아무것도 남지 않는다', () => {
+  const root = rootWith([finding({ id: 'F-1' })]);
+  const ledger = loadLedger(root);
+  fs.mkdirSync(path.join(root, '.review', 'findings.json.tmp'));
+  assert.throws(() => decide(root, ledger, 'F-1', 'intended', '이유', '2026-10-11'));
+  assert.equal(decisionsText(root), '# 결정 기록\n');
+  assert.equal(loadLedger(root).findings[0].status, 'open');
+});
+
+test('skills: review 가 스테이징·미추적·삭제 파일과 후보 evidence 를 다룬다', () => {
+  const review = fs.readFileSync(
+    fileURLToPath(new URL('../skills/review/SKILL.md', import.meta.url)),
+    'utf8',
+  );
+  assert.match(review, /git diff --name-only --diff-filter=d HEAD/);
+  assert.match(review, /git ls-files --others --exclude-standard/);
+  assert.match(review, /ledger\.mjs" list --status open/);
+  assert.match(review, /`file`, `symbol`, `evidence` 는 explorer 가 낸 값을 그대로/);
+});

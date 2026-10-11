@@ -89,6 +89,9 @@ function validateResults(ledger, results) {
     for (const key of ['file', 'symbol', 'title', 'evidence']) {
       if (!filled(hit[key])) errors.push(`${at}: ${key} 가 비어 있습니다`);
     }
+    if (filled(hit.file) && (path.isAbsolute(hit.file) || /^[A-Za-z]:/.test(hit.file))) {
+      errors.push(`${at}: file 은 저장소 루트 기준 상대 경로여야 합니다 (${hit.file})`);
+    }
     if (hit.matches != null && !statusById.has(hit.matches)) {
       errors.push(`${at}: matches 가 원장에 없는 id 를 가리킵니다 (${hit.matches})`);
     }
@@ -144,11 +147,16 @@ export function apply(ledger, results) {
       source: `explore:${c.category}`,
       confirmed: c.verdict === 'confirmed',
     })),
-  ].map((h) => ({
-    ...h,
-    file: normFile(h.file),
-    id: h.matches ?? findingId(h.source, h.file, h.symbol),
-  }));
+  ]
+    .map((h) => {
+      const file = normFile(h.file);
+      // matches 는 같은 source, 같은 파일의 지적을 가리킬 때만 믿는다.
+      const target = h.matches != null ? byId.get(h.matches) : null;
+      const usable = target && target.source === h.source && target.file === file;
+      return { ...h, file, id: usable ? h.matches : findingId(h.source, file, h.symbol) };
+    })
+    // 같은 ID 가 confirmed 와 unconfirmed 로 함께 오면 순서와 상관없이 confirmed 가 이긴다.
+    .sort((a, b) => Number(b.confirmed) - Number(a.confirmed));
   const confirmedIds = new Set(hits.filter((h) => h.confirmed).map((h) => h.id));
 
   for (const r of results.rechecks) {
@@ -240,11 +248,16 @@ export function decide(root, ledger, id, decision, reason, date = new Date().toI
   f.decisionId = decisionId;
 
   const oneLine = reason.trim().replace(/\s*[\r\n]+\s*/g, ' ');
-  fs.appendFileSync(
-    file,
-    `\n## ${decisionId}\n- 날짜: ${date}\n- 지적: ${id}\n- 대상: ${f.file} ${f.symbol}\n- 결정: ${decision}\n- 이유: ${oneLine}\n`,
-  );
+  const entry = `\n## ${decisionId}\n- 날짜: ${date}\n- 지적: ${id}\n- 대상: ${f.file} ${f.symbol}\n- 결정: ${decision}\n- 이유: ${oneLine}\n`;
+  // 두 파일이 어긋나지 않게 원장을 먼저 저장하고, 결정 기록에 실패하면 원장을 되돌린다.
+  const previous = fs.readFileSync(ledgerPath(root), 'utf8');
   saveLedger(root, ledger);
+  try {
+    fs.appendFileSync(file, entry);
+  } catch (e) {
+    fs.writeFileSync(ledgerPath(root), previous);
+    throw e;
+  }
   return { decisionId, status: f.status };
 }
 
