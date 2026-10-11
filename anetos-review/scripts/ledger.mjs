@@ -33,3 +33,41 @@ export function init(root, pluginRoot) {
   fs.writeFileSync(path.join(dir, '.gitignore'), '*.tmp\n');
   return { created: true };
 }
+
+function ledgerPath(root) {
+  return path.join(root, DIR, 'findings.json');
+}
+
+export function loadLedger(root) {
+  const file = ledgerPath(root);
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch {
+    throw new LedgerError(`원장이 없습니다: ${file}. 먼저 init 을 실행하세요.`);
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    throw new LedgerError(`findings.json 을 읽을 수 없습니다: ${e.message}`);
+  }
+  if (!data || data.version !== VERSION || !Array.isArray(data.findings)) {
+    throw new LedgerError(`findings.json 의 형식이 맞지 않습니다 (version ${VERSION} 필요).`);
+  }
+  return data;
+}
+
+export function saveLedger(root, ledger) {
+  const file = ledgerPath(root);
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(ledger, null, 2) + '\n');
+  fs.renameSync(tmp, file);
+}
+
+export function list(ledger, { files, status } = {}) {
+  const wanted = files && new Set(files.map(normFile));
+  return ledger.findings.filter(
+    (f) => (!wanted || wanted.has(f.file)) && (!status || f.status === status),
+  );
+}
