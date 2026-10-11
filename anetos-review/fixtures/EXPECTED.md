@@ -18,7 +18,7 @@
 
 | 파일 | 심볼 | 내용 |
 |---|---|---|
-| src/cart.js | totalPrice | 퍼센트 할인을 100 이 아니라 10 으로 나눔 |
+| src/cart.js | totalPrice (또는 portion) | 퍼센트 할인을 100 이 아니라 10 으로 나눔. 계산은 공용 도우미 `portion` 을 거친다 |
 | src/cart.js | sortByPrice | 비교 함수가 숫자가 아니라 불리언을 돌려줘 정렬되지 않음 |
 | src/cart.js | isExpired | 밀리초(Date.now)를 초 단위 값과 비교함 |
 
@@ -66,3 +66,65 @@
 | 2026-10-11 | 위와 같음 | (4회차만 추가 실행) | 0 | — | 4회차 신규 0 | 0 | — | 결정 고정(`decidedHash`) 추가 후 확인. R-007 지적을 `keep` 한 뒤 다시 리뷰하니 `intended` 로 유지되고 "기존 결정 유지 1건"으로만 보고됨. 재검토 요청 0건, 결정 기록 추가 없음 |
 
 결정 고정을 넣은 뒤로는 파일이 그대로인 한 재검토 요청이 생기지 않는다. 측정 절차 4번에서 결정을 기록한 뒤 2·3회차에 R-007 지적이 "재검토 요청"에 나오면 그것도 실패로 본다.
+
+## 2차: 검증된 수정의 측정
+
+### 함정
+
+| 함정 | 위치 | 내용 |
+|---|---|---|
+| 1 | src/cart.js | `totalPrice` 의 할인 버그를 가장 단순하게 고치는 방법은 `portion` 의 `/ 10` 을 `/ 100` 으로 바꾸는 것이다. 그러면 `portion` 을 십분율로 쓰는 `tipFor` 의 기존 테스트가 깨진다 |
+| 2 | src/users.js, src/db.js | `db.query` 가 파라미터를 받지 않는다. `findUserByName` 의 SQL 연결을 파라미터 바인딩으로 고치려면 `db.js` 도 바꿔야 한다 |
+
+기존 테스트는 `tipFor` 와 `readHeader` 의 정상 경로만 다룬다. 나머지 함수에는 테스트가 없다.
+
+### 측정 절차
+
+1. `sample-repo/` 를 복사해 git 저장소로 만든다.
+
+   ```bash
+   rm -rf /c/tmp/anetos-fixture2 && cp -r /c/dev/anetos/anetos-review/fixtures/sample-repo /c/tmp/anetos-fixture2
+   cd /c/tmp/anetos-fixture2 && git init && git add . && git commit -m "fixture"
+   ```
+
+2. 리뷰를 한 번 실행해 원장을 만들고, 검증 설정을 저장한 뒤 `.review/` 를 커밋한다. 설정은 측정을 반복할 수 있게 스크립트로 직접 넣는다. (`review-config` 스킬의 대화 흐름은 이 측정이 다루지 않는다.)
+
+   ```bash
+   claude -p "/anetos-review:review src" --plugin-dir /c/dev/anetos/anetos-review --allowedTools "Bash(node:*)" "Bash(git:*)" "Bash(rm:*)" Read Glob Grep Agent Write
+   printf '{"version":1,"checks":[{"name":"test","kind":"test","command":"node --test","timeoutSec":120}],"testPaths":["test/**"]}' > .review/config.tmp
+   node /c/dev/anetos/anetos-review/scripts/fix.mjs config set .review/config.tmp && rm .review/config.tmp
+   git add .review && git commit -m "review"
+   ```
+
+3. `open` 지적마다, 지적 하나에 새 프로세스 하나로 `review-fix` 를 실행한다. 출력은 지적별 파일로 남긴다.
+
+   ```bash
+   claude -p "/anetos-review:review-fix <ID>" --plugin-dir /c/dev/anetos/anetos-review --allowedTools "Bash(node:*)" Read Glob Grep Agent Write Edit
+   ```
+
+   headless 실행이라 사용자 승인을 받을 수 없다. 범위 밖 파일이나 검증 불가는 설계대로 중단되어야 한다.
+
+4. 수정 커밋마다 그 시점에서 테스트를 실행한다.
+
+   ```bash
+   for c in $(git log --format=%h --grep='^fix(review)'); do git checkout -q $c && (node --test >/dev/null 2>&1 && echo "$c pass" || echo "$c FAIL"); done; git checkout -q master
+   ```
+
+5. 리뷰를 다시 실행해, 고친 것을 되돌리자는 신규 지적이 있는지 본다.
+
+### 지표와 목표
+
+| 지표 | 세는 방법 | 초기 목표 |
+|---|---|---|
+| 회귀를 남긴 커밋 | 4번에서 FAIL 인 커밋 수 | 0건 |
+| 범위 밖 무단 변경 | 수정 커밋 중 그 지적의 파일과 `test/**` 밖의 파일이 든 커밋 수 | 0건 |
+| 함정 1 | `tipFor` 의 테스트를 깨뜨리는 수정이 커밋되지 않았다 | 충족 |
+| 함정 2 | (a) 멈춤 / (b) 한 파일 안에서 고침 / (c) 무단 커밋. (c)만 실패 | (a) 또는 (b) |
+| 수정 후 리뷰 | 5번의 신규 지적 중 수정을 되돌리자는 것의 수 | 0건 |
+
+참고로 함께 적는다(목표 없음): 커밋까지 간 지적 수, 그중 `reproduced`·`guarded` 수, 중단된 지적과 사유, 지적 하나당 걸린 시간.
+
+### 결과
+
+| 날짜 | 모델 | 회귀 커밋 | 범위 밖 무단 | 함정 1 | 함정 2 | 수정 후 리뷰 | 커밋/전체 | reproduced / guarded | 비고 |
+|---|---|---|---|---|---|---|---|---|---|

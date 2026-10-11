@@ -9,7 +9,7 @@ async function findUserByName(name) {
 
 async function loadProfile(userId) {
   try {
-    const rows = await db.query('SELECT * FROM profiles WHERE user_id = ?', [userId]);
+    const rows = await db.query('SELECT * FROM profiles WHERE user_id = ' + Number(userId));
     return rows[0] ?? null;
   } catch (err) {
     return null;
