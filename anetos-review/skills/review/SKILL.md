@@ -50,7 +50,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" list --files <범위 파일을 �
 
 ## 3. 기존 지적 재확인
 
-기존 지적 중 `status` 가 `open` 인 것마다 `anetos-review:verifier` 를 하나씩, 한 번에 병렬로 띄운다. 넘기는 내용:
+기존 지적 중 `status` 가 `open` 이거나 `reopen-requested` 인 것마다 `anetos-review:verifier` 를 하나씩, 한 번에 병렬로 띄운다. 재검토 요청 중인 지적도 코드에서 사라졌으면 더 물을 것이 없으므로 함께 확인한다. 넘기는 내용:
 
 ```
 mode: recheck
@@ -64,9 +64,10 @@ id, source, file, symbol, title, evidence
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" list --status open
+node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" list --status reopen-requested
 ```
 
-결과 중 `file` 이 저장소에 더 이상 없는 지적은 verifier 를 띄우지 않고 `rechecks` 에 `{ id, verdict: "absent", evidence: "" }` 로 넣는다. 파일이 있는 범위 밖 지적은 건드리지 않는다.
+두 결과 중 `file` 이 저장소에 더 이상 없는 지적은 verifier 를 띄우지 않고 `rechecks` 에 `{ id, verdict: "absent", evidence: "" }` 로 넣는다. 파일이 있는 범위 밖 지적은 건드리지 않는다.
 
 ## 4. 규칙 검사
 
@@ -93,13 +94,19 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" list --status open
 
 ## 6. 후보 검증
 
-explorer 가 낸 후보마다 먼저 ID 를 정한다. `matches` 가 있으면 그 값이고, 없으면 다음으로 계산한다.
+explorer 가 낸 후보가 이전에 기각된 것인지 먼저 확인한다. 후보들의 `category`, `file`, `symbol` 을 배열로 `.review/ids.tmp` 에 쓴다. 심볼 이름에 `$` 나 따옴표가 있어도 셸이 건드리지 않도록 명령 인자가 아니라 파일로 넘긴다.
 
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" id "explore:<category>" "<file>" "<symbol>"
+```json
+[{ "category": "bug", "file": "src/cart.js", "symbol": "totalPrice" }]
 ```
 
-그 ID 가 기존 지적에 있고 `status` 가 `dismissed` 이면 그 후보는 버린다. 검증하지 않고 `candidates` 에도 넣지 않는다.
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" ids .review/ids.tmp
+```
+
+결과는 같은 순서의 `{ id, status }` 배열이다. 확인이 끝나면 `.review/ids.tmp` 를 지운다.
+
+`status` 가 `dismissed` 인 후보는 버린다. 후보의 `matches` 가 가리키는 기존 지적이 `dismissed` 인 경우도 같다. 검증하지 않고 `candidates` 에도 넣지 않는다.
 
 남은 후보마다 `anetos-review:verifier` 를 하나씩 병렬로 띄운다. 넘기는 내용은 다음뿐이다.
 
@@ -143,6 +150,10 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" apply .review/results.tmp
 ## 8. 보고
 
 `apply` 가 돌려준 요약의 ID 로 지적을 조회해 다섯 묶음으로 보여 준다. 비어 있는 묶음은 생략한다.
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" list --ids <ID 를 쉼표로 이은 것>
+```
 
 1. **신규** (`new`)
 2. **여전히 열려 있음** (`stillOpen`)

@@ -31,18 +31,37 @@ export function fileHash(root, file) {
   return createHash('sha1').update(text.replace(/\r\n/g, '\n')).digest('hex');
 }
 
+const DECISIONS_HEADER = '# 결정 기록\n';
+
+// 줄을 나누는 문자. 한 줄이어야 하는 값에 들어가면 decisions.md 의 구조가 깨진다.
+const LINE_BREAKS = new RegExp(`[\\r\\n\\v\\f${String.fromCharCode(0x85, 0x2028, 0x2029)}]`);
+const oneLine = (text) =>
+  text.trim().split(LINE_BREAKS).map((part) => part.trim()).filter(Boolean).join(' ');
+const stripBom = (text) => (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+const filled = (v) => typeof v === 'string' && v.trim() !== '';
+
+// 없는 파일만 만든다. 이미 있는 파일은 건드리지 않는다.
 export function init(root, pluginRoot) {
   const dir = path.join(root, DIR);
-  if (fs.existsSync(dir)) return { created: false };
+  const created = !fs.existsSync(dir);
   fs.mkdirSync(dir, { recursive: true });
-  fs.copyFileSync(path.join(pluginRoot, 'rules', 'default.md'), path.join(dir, 'rules.md'));
-  fs.writeFileSync(
-    path.join(dir, 'findings.json'),
-    JSON.stringify({ version: VERSION, findings: [] }, null, 2) + '\n',
-  );
-  fs.writeFileSync(path.join(dir, 'decisions.md'), '# 결정 기록\n');
-  fs.writeFileSync(path.join(dir, '.gitignore'), '*.tmp\n');
-  return { created: true };
+  const files = [
+    ['rules.md', (file) => fs.copyFileSync(path.join(pluginRoot, 'rules', 'default.md'), file)],
+    [
+      'findings.json',
+      (file) => fs.writeFileSync(file, JSON.stringify({ version: VERSION, findings: [] }, null, 2) + '\n'),
+    ],
+    ['decisions.md', (file) => fs.writeFileSync(file, DECISIONS_HEADER)],
+    ['.gitignore', (file) => fs.writeFileSync(file, '*.tmp\n')],
+  ];
+  const repaired = [];
+  for (const [name, write] of files) {
+    const file = path.join(dir, name);
+    if (fs.existsSync(file)) continue;
+    write(file);
+    repaired.push(name);
+  }
+  return created || repaired.length === 0 ? { created } : { created, repaired };
 }
 
 function ledgerPath(root) {
@@ -59,7 +78,7 @@ export function loadLedger(root) {
   }
   let data;
   try {
-    data = JSON.parse(raw);
+    data = JSON.parse(stripBom(raw));
   } catch (e) {
     throw new LedgerError(`findings.json 을 읽을 수 없습니다: ${e.message}`);
   }
@@ -76,22 +95,46 @@ export function saveLedger(root, ledger) {
   fs.renameSync(tmp, file);
 }
 
-export function list(ledger, { files, status } = {}) {
+export function list(ledger, { files, status, ids } = {}) {
   const wanted = files && new Set(files.map(normFile));
+  const wantedIds = ids && new Set(ids);
   return ledger.findings.filter(
-    (f) => (!wanted || wanted.has(f.file)) && (!status || f.status === status),
+    (f) =>
+      (!wanted || wanted.has(f.file)) &&
+      (!status || f.status === status) &&
+      (!wantedIds || wantedIds.has(f.id)),
   );
 }
 
 const CATEGORIES = ['bug', 'security', 'data-loss', 'concurrency'];
+const STATUSES = ['open', 'resolved', 'intended', 'rejected', 'dismissed', 'reopen-requested'];
+
+// 후보나 위반이 원장에서 어떤 ID 가 되는지, 지금 어떤 상태인지 알려 준다.
+export function lookup(ledger, items) {
+  if (!Array.isArray(items)) throw new LedgerError('항목의 배열이어야 합니다');
+  const statusById = new Map(ledger.findings.map((f) => [f.id, f.status]));
+  return items.map((item, i) => {
+    const source = item?.source ?? (item?.category ? `explore:${item.category}` : null);
+    if (!filled(source) || !filled(item.file) || !filled(item.symbol)) {
+      throw new LedgerError(`[${i}]: source(또는 category), file, symbol 이 있어야 합니다`);
+    }
+    const id = findingId(source, item.file, item.symbol);
+    return { id, status: statusById.get(id) ?? null };
+  });
+}
 
 function validateResults(ledger, results) {
   if (!results || typeof results !== 'object') return ['결과가 객체가 아닙니다'];
   const errors = [];
-  const filled = (v) => typeof v === 'string' && v.trim() !== '';
   if (!filled(results.commit)) errors.push('commit: 비어 있지 않은 문자열이어야 합니다');
   for (const key of ['rechecks', 'violations', 'candidates']) {
-    if (!Array.isArray(results[key])) errors.push(`${key}: 배열이어야 합니다`);
+    if (!Array.isArray(results[key])) {
+      errors.push(`${key}: 배열이어야 합니다`);
+      continue;
+    }
+    results[key].forEach((item, i) => {
+      if (!item || typeof item !== 'object') errors.push(`${key}[${i}]: 객체가 아닙니다`);
+    });
   }
   if (errors.length) return errors;
 
@@ -99,6 +142,11 @@ function validateResults(ledger, results) {
   const checkHit = (hit, at) => {
     for (const key of ['file', 'symbol', 'title', 'evidence']) {
       if (!filled(hit[key])) errors.push(`${at}: ${key} 가 비어 있습니다`);
+    }
+    for (const key of ['file', 'symbol']) {
+      if (filled(hit[key]) && LINE_BREAKS.test(hit[key])) {
+        errors.push(`${at}: ${key} 에 줄바꿈이 있습니다`);
+      }
     }
     if (filled(hit.file) && (path.isAbsolute(hit.file) || /^[A-Za-z]:/.test(hit.file))) {
       errors.push(`${at}: file 은 저장소 루트 기준 상대 경로여야 합니다 (${hit.file})`);
@@ -111,8 +159,10 @@ function validateResults(ledger, results) {
   results.rechecks.forEach((r, i) => {
     const at = `rechecks[${i}]`;
     if (!statusById.has(r.id)) errors.push(`${at}: 원장에 없는 id 입니다 (${r.id})`);
-    else if (statusById.get(r.id) !== 'open') {
-      errors.push(`${at}: ${r.id} 의 상태가 open 이 아닙니다 (${statusById.get(r.id)})`);
+    else if (statusById.get(r.id) !== 'open' && statusById.get(r.id) !== 'reopen-requested') {
+      errors.push(
+        `${at}: ${r.id} 의 상태가 open 이나 reopen-requested 가 아닙니다 (${statusById.get(r.id)})`,
+      );
     }
     if (r.verdict !== 'present' && r.verdict !== 'absent') {
       errors.push(`${at}: verdict 는 present 또는 absent 여야 합니다`);
@@ -171,14 +221,27 @@ export function apply(ledger, results, hashOf = () => null) {
     .sort((a, b) => Number(b.confirmed) - Number(a.confirmed));
   const confirmedIds = new Set(hits.filter((h) => h.confirmed).map((h) => h.id));
 
+  // 같은 지적의 재확인이 여러 개 와도 순서와 상관없이 present 가 이긴다.
+  const rechecked = new Map();
   for (const r of results.rechecks) {
-    const f = byId.get(r.id);
+    const seen = rechecked.get(r.id) ?? { present: false, evidence: '' };
+    if (r.verdict === 'present') {
+      seen.present = true;
+      if (!seen.evidence && filled(r.evidence)) seen.evidence = r.evidence;
+    }
+    rechecked.set(r.id, seen);
+  }
+  for (const [id, seen] of rechecked) {
+    const f = byId.get(id);
     f.lastChecked = commit;
-    if (r.verdict === 'present' || confirmedIds.has(r.id)) {
-      summary.stillOpen.add(r.id);
+    if (seen.present || confirmedIds.has(id)) {
+      if (seen.evidence) f.evidence = seen.evidence;
+      (f.status === 'open' ? summary.stillOpen : summary.reopenRequested).add(id);
     } else {
+      // 재검토 요청 중이던 지적도 코드에서 사라졌으면 더 물을 것이 없다.
       f.status = 'resolved';
-      summary.resolved.add(r.id);
+      delete f.previousStatus;
+      summary.resolved.add(id);
     }
   }
 
@@ -237,12 +300,12 @@ const DECISIONS = {
 };
 
 export function decide(root, ledger, id, decision, reason, date = new Date().toISOString().slice(0, 10)) {
-  const required = DECISIONS[decision];
+  const required = Object.hasOwn(DECISIONS, decision) ? DECISIONS[decision] : null;
   if (!required) {
     throw new LedgerError(`알 수 없는 결정입니다: ${decision} (intended, rejected, reopen, keep 중 하나)`);
   }
   if (typeof reason !== 'string' || reason.trim() === '') {
-    throw new LedgerError('이유는 필수입니다. --reason "..." 으로 적어 주세요.');
+    throw new LedgerError('이유는 필수입니다. --reason "..." 또는 --reason-file <파일> 로 적어 주세요.');
   }
   const f = ledger.findings.find((x) => x.id === id);
   if (!f) throw new LedgerError(`원장에 없는 id 입니다: ${id}`);
@@ -253,6 +316,7 @@ export function decide(root, ledger, id, decision, reason, date = new Date().toI
   }
 
   const file = path.join(root, DIR, 'decisions.md');
+  if (!fs.existsSync(file)) fs.writeFileSync(file, DECISIONS_HEADER);
   const text = fs.readFileSync(file, 'utf8');
   const numbers = [...text.matchAll(/^## D-(\d+)\s*$/gm)].map((m) => Number(m[1]));
   const decisionId = `D-${String(Math.max(0, ...numbers) + 1).padStart(4, '0')}`;
@@ -267,8 +331,7 @@ export function decide(root, ledger, id, decision, reason, date = new Date().toI
   if (decision === 'reopen') delete f.decidedHash;
   else f.decidedHash = fileHash(root, f.file);
 
-  const oneLine = reason.trim().replace(/\s*[\r\n]+\s*/g, ' ');
-  const entry = `\n## ${decisionId}\n- 날짜: ${date}\n- 지적: ${id}\n- 대상: ${f.file} ${f.symbol}\n- 결정: ${decision}\n- 이유: ${oneLine}\n`;
+  const entry = `\n## ${decisionId}\n- 날짜: ${date}\n- 지적: ${id}\n- 대상: ${oneLine(f.file)} ${oneLine(f.symbol)}\n- 결정: ${decision}\n- 이유: ${oneLine(reason)}\n`;
   // 두 파일이 어긋나지 않게 원장을 먼저 저장하고, 결정 기록에 실패하면 원장을 되돌린다.
   const previous = fs.readFileSync(ledgerPath(root), 'utf8');
   saveLedger(root, ledger);
@@ -278,25 +341,55 @@ export function decide(root, ledger, id, decision, reason, date = new Date().toI
     fs.writeFileSync(ledgerPath(root), previous);
     throw e;
   }
-  return { decisionId, status: f.status };
+  return { decisionId, status: f.status, decision };
 }
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const USAGE = '사용법: ledger.mjs <init | list [--files a,b] [--status s] | id <source> <file> <symbol> | apply <결과 파일> | decide <id> <결정> --reason "...">';
+const USAGE = '사용법: ledger.mjs <init | list [--files a,b] [--status s] [--ids a,b] | id <source> <file> <symbol> | ids <항목 파일> | apply <결과 파일> | decide <id> <결정> (--reason "..." | --reason-file <파일>)>';
 
-function parseArgs(argv) {
+const OPTIONS = {
+  list: ['files', 'status', 'ids'],
+  decide: ['reason', 'reason-file'],
+};
+
+// --이름 값 과 --이름=값 을 모두 받는다. 모르는 옵션과 값이 빠진 옵션은 오류다.
+function parseArgs(argv, allowed = []) {
   const pos = [];
   const opts = {};
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i].startsWith('--')) opts[argv[i].slice(2)] = argv[++i];
-    else pos.push(argv[i]);
+    const arg = argv[i];
+    if (!arg.startsWith('--')) {
+      pos.push(arg);
+      continue;
+    }
+    const eq = arg.indexOf('=');
+    const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+    if (!allowed.includes(name)) throw new LedgerError(`알 수 없는 옵션입니다: --${name}\n${USAGE}`);
+    const value = eq === -1 ? argv[++i] : arg.slice(eq + 1);
+    if (value === undefined) throw new LedgerError(`--${name} 에 값이 없습니다`);
+    opts[name] = value;
   }
   return { pos, opts };
 }
 
+function listOption(opts, name) {
+  if (opts[name] === undefined) return undefined;
+  const values = opts[name].split(',').map((v) => v.trim()).filter(Boolean);
+  if (values.length === 0) throw new LedgerError(`--${name} 에 값이 없습니다`);
+  return values;
+}
+
+function readJson(file, what) {
+  try {
+    return JSON.parse(stripBom(fs.readFileSync(file, 'utf8')));
+  } catch (e) {
+    throw new LedgerError(`${what} 파일을 읽을 수 없습니다: ${e.message}`);
+  }
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv;
-  const { pos, opts } = parseArgs(rest);
+  const { pos, opts } = parseArgs(rest, OPTIONS[cmd]);
   const root = process.cwd();
   const out = (value) => console.log(JSON.stringify(value, null, 2));
 
@@ -306,21 +399,25 @@ function main(argv) {
     case 'id':
       if (pos.length !== 3) throw new LedgerError(USAGE);
       return out({ id: findingId(pos[0], pos[1], pos[2]) });
-    case 'list':
+    case 'ids':
+      if (pos.length !== 1) throw new LedgerError(USAGE);
+      return out(lookup(loadLedger(root), readJson(pos[0], '항목')));
+    case 'list': {
+      if (pos.length !== 0) throw new LedgerError(USAGE);
+      if (opts.status !== undefined && !STATUSES.includes(opts.status)) {
+        throw new LedgerError(`알 수 없는 상태입니다: ${opts.status} (${STATUSES.join(', ')} 중 하나)`);
+      }
       return out(
         list(loadLedger(root), {
-          files: opts.files?.split(',').filter(Boolean),
+          files: listOption(opts, 'files'),
           status: opts.status,
+          ids: listOption(opts, 'ids'),
         }),
       );
+    }
     case 'apply': {
       if (pos.length !== 1) throw new LedgerError(USAGE);
-      let results;
-      try {
-        results = JSON.parse(fs.readFileSync(pos[0], 'utf8'));
-      } catch (e) {
-        throw new LedgerError(`결과 파일을 읽을 수 없습니다: ${e.message}`);
-      }
+      const results = readJson(pos[0], '결과');
       const ledger = loadLedger(root);
       const summary = apply(ledger, results, (file) => fileHash(root, file));
       saveLedger(root, ledger);
@@ -328,7 +425,19 @@ function main(argv) {
     }
     case 'decide': {
       if (pos.length !== 2) throw new LedgerError(USAGE);
-      return out(decide(root, loadLedger(root), pos[0], pos[1], opts.reason));
+      if (opts.reason !== undefined && opts['reason-file'] !== undefined) {
+        throw new LedgerError('--reason 과 --reason-file 은 하나만 씁니다');
+      }
+      let reason = opts.reason;
+      if (opts['reason-file'] !== undefined) {
+        try {
+          // 파일로 받으면 셸이 $, 백틱, 따옴표를 해석할 일이 없다.
+          reason = stripBom(fs.readFileSync(opts['reason-file'], 'utf8'));
+        } catch (e) {
+          throw new LedgerError(`이유 파일을 읽을 수 없습니다: ${e.message}`);
+        }
+      }
+      return out(decide(root, loadLedger(root), pos[0], pos[1], reason));
     }
     default:
       throw new LedgerError(USAGE);

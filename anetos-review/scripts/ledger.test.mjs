@@ -333,7 +333,7 @@ test('decide: intended 는 상태를 바꾸고 결정을 기록한다', () => {
   const root = rootWith([finding({ id: 'F-1' })]);
   const ledger = loadLedger(root);
   const result = decide(root, ledger, 'F-1', 'intended', '내부 상수만 넘긴다', '2026-10-11');
-  assert.deepEqual(result, { decisionId: 'D-0001', status: 'intended' });
+  assert.deepEqual(result, { decisionId: 'D-0001', status: 'intended', decision: 'intended' });
   assert.equal(loadLedger(root).findings[0].status, 'intended');
   assert.equal(loadLedger(root).findings[0].decisionId, 'D-0001');
   assert.equal(
@@ -648,4 +648,202 @@ test('apply: 고쳐서 해결된 지적이 재발하면 fixLevel 을 지운다',
   assert.deepEqual(summary.recurred, [VIOL_ID]);
   assert.equal(ledger.findings[0].status, 'open');
   assert.equal('fixLevel' in ledger.findings[0], false);
+});
+
+test('decide: 줄 구분 문자가 든 이유와 심볼이 결정 번호를 망가뜨리지 않는다', () => {
+  const root = rootWith([
+    finding({ id: 'F-1', symbol: 'foo\n## D-0500' }),
+    finding({ id: 'F-2' }),
+  ]);
+  const ledger = loadLedger(root);
+  decide(root, ledger, 'F-1', 'intended', '첫 줄\u2028## D-0099\u2029끝', '2026-10-11');
+  assert.equal(decide(root, ledger, 'F-2', 'rejected', '이유', '2026-10-11').decisionId, 'D-0002');
+  const headings = decisionsText(root).split(/[\n\u2028\u2029]/).filter((l) => l.startsWith('## D-'));
+  assert.deepEqual(headings, ['## D-0001', '## D-0002']);
+});
+
+test('apply: file 이나 symbol 에 줄바꿈이 있으면 형식 오류다', () => {
+  const ledger = emptyLedger();
+  for (const over of [{ symbol: 'foo\nbar' }, { file: 'src/a.js\u2028x' }]) {
+    assert.throws(() => apply(ledger, results({ violations: [viol(over)] })), LedgerError);
+  }
+  assert.deepEqual(ledger.findings, []);
+});
+
+test('init: 빠진 파일만 다시 만들고 있는 파일은 건드리지 않는다', () => {
+  const root = tmpDir();
+  const plugin = fakePlugin();
+  init(root, plugin);
+  const dir = path.join(root, '.review');
+  fs.writeFileSync(path.join(dir, 'rules.md'), '## R-900 프로젝트 규칙\n');
+  fs.rmSync(path.join(dir, 'findings.json'));
+  fs.rmSync(path.join(dir, 'decisions.md'));
+  assert.deepEqual(init(root, plugin), {
+    created: false,
+    repaired: ['findings.json', 'decisions.md'],
+  });
+  assert.equal(fs.readFileSync(path.join(dir, 'rules.md'), 'utf8'), '## R-900 프로젝트 규칙\n');
+  assert.deepEqual(loadLedger(root).findings, []);
+  assert.equal(decisionsText(root), '# 결정 기록\n');
+});
+
+test('BOM 이 붙은 원장과 결과 파일을 읽는다', () => {
+  const root = tmpDir();
+  cli(root, 'init');
+  const ledgerFile = path.join(root, '.review', 'findings.json');
+  fs.writeFileSync(ledgerFile, '\uFEFF' + fs.readFileSync(ledgerFile, 'utf8'));
+  assert.deepEqual(loadLedger(root).findings, []);
+  const input = path.join(root, '.review', 'results.tmp');
+  fs.writeFileSync(input, '\uFEFF' + JSON.stringify(results({ violations: [viol()] })));
+  const applied = cli(root, 'apply', input);
+  assert.equal(applied.code, 0, applied.stderr);
+});
+
+test('apply: 배열에 객체가 아닌 것이 있으면 LedgerError', () => {
+  for (const key of ['rechecks', 'violations', 'candidates']) {
+    assert.throws(() => apply(emptyLedger(), results({ [key]: [null] })), LedgerError);
+  }
+});
+
+test('decide: decisions.md 가 없으면 새로 만든다', () => {
+  const root = rootWith([finding({ id: 'F-1' })]);
+  fs.rmSync(path.join(root, '.review', 'decisions.md'));
+  const result = decide(root, loadLedger(root), 'F-1', 'intended', '이유', '2026-10-11');
+  assert.equal(result.decisionId, 'D-0001');
+  assert.match(decisionsText(root), /^# 결정 기록\n\n## D-0001\n/);
+});
+
+test('apply: 같은 지적의 재확인이 엇갈리면 순서와 상관없이 present 가 이기고 위치를 갱신한다', () => {
+  for (const order of [['absent', 'present'], ['present', 'absent']]) {
+    const ledger = emptyLedger();
+    apply(ledger, results({ violations: [viol()] }));
+    const summary = apply(
+      ledger,
+      results({
+        commit: 'c2',
+        rechecks: order.map((verdict) => ({
+          id: VIOL_ID,
+          verdict,
+          evidence: verdict === 'present' ? 'src/a.js:77' : '',
+        })),
+      }),
+    );
+    assert.equal(ledger.findings[0].status, 'open');
+    assert.equal(ledger.findings[0].evidence, 'src/a.js:77');
+    assert.deepEqual(summary.stillOpen, [VIOL_ID]);
+    assert.deepEqual(summary.resolved, []);
+  }
+});
+
+test('apply: reopen-requested 지적도 재확인해서 없어졌으면 resolved 로 바꾼다', () => {
+  const ledger = emptyLedger();
+  apply(ledger, results({ violations: [viol()] }));
+  Object.assign(ledger.findings[0], { status: 'reopen-requested', previousStatus: 'intended' });
+
+  const present = apply(
+    ledger,
+    results({ commit: 'c2', rechecks: [{ id: VIOL_ID, verdict: 'present', evidence: '' }] }),
+  );
+  assert.equal(ledger.findings[0].status, 'reopen-requested');
+  assert.deepEqual(present.reopenRequested, [VIOL_ID]);
+  assert.deepEqual(present.stillOpen, []);
+
+  const absent = apply(
+    ledger,
+    results({ commit: 'c3', rechecks: [{ id: VIOL_ID, verdict: 'absent', evidence: '' }] }),
+  );
+  assert.equal(ledger.findings[0].status, 'resolved');
+  assert.equal('previousStatus' in ledger.findings[0], false);
+  assert.deepEqual(absent.resolved, [VIOL_ID]);
+});
+
+function appliedRoot() {
+  const root = tmpDir();
+  cli(root, 'init');
+  const input = path.join(root, '.review', 'results.tmp');
+  fs.writeFileSync(
+    input,
+    JSON.stringify(results({ violations: [viol()], candidates: [cand({ verdict: 'unconfirmed' })] })),
+  );
+  assert.equal(cli(root, 'apply', input).code, 0);
+  return root;
+}
+
+test('CLI: 옵션 형식을 엄격하게 받는다', () => {
+  const root = appliedRoot();
+  const ids = (r) => JSON.parse(r.stdout).map((f) => f.id);
+
+  assert.equal(cli(root, 'list', '--files').code, 1);
+  assert.equal(cli(root, 'list', '--files', ' , ').code, 1);
+  assert.equal(cli(root, 'list', '--status', 'opne').code, 1);
+  assert.equal(cli(root, 'list', '--nope', 'x').code, 1);
+  assert.deepEqual(ids(cli(root, 'list', '--files', 'src/b.js, src/a.js', '--status', 'open')), [VIOL_ID]);
+  assert.deepEqual(ids(cli(root, 'list', '--status=dismissed')), [CAND_ID]);
+  assert.deepEqual(ids(cli(root, 'list', '--ids', `F-none, ${VIOL_ID}`)), [VIOL_ID]);
+
+  const weird = cli(root, 'decide', VIOL_ID, 'toString', '--reason', '이유');
+  assert.equal(weird.code, 1);
+  assert.match(weird.stderr, /알 수 없는 결정/);
+  const decided = cli(root, 'decide', VIOL_ID, 'intended', '--reason=의도된 설계');
+  assert.equal(decided.code, 0, decided.stderr);
+  assert.deepEqual(JSON.parse(decided.stdout), {
+    decisionId: 'D-0001',
+    status: 'intended',
+    decision: 'intended',
+  });
+});
+
+test('CLI: --reason-file 은 이유를 셸 해석 없이 그대로 기록한다', () => {
+  const root = appliedRoot();
+  const reason = '값은 $HOME 과 `whoami` 와 "따옴표" 와 \'작은따옴표\' 를 그대로 둔다';
+  const file = path.join(root, '.review', 'reason.tmp');
+  fs.writeFileSync(file, `\uFEFF${reason}\n`);
+  const decided = cli(root, 'decide', VIOL_ID, 'intended', '--reason-file', file);
+  assert.equal(decided.code, 0, decided.stderr);
+  assert.ok(decisionsText(root).endsWith(`- 이유: ${reason}\n`));
+
+  const again = appliedRoot();
+  assert.equal(cli(again, 'decide', VIOL_ID, 'intended', '--reason-file', 'missing.tmp').code, 1);
+  assert.equal(
+    cli(again, 'decide', VIOL_ID, 'intended', '--reason', 'a', '--reason-file', file).code,
+    1,
+  );
+});
+
+test('CLI: ids 는 후보의 ID 와 현재 상태를 돌려준다', () => {
+  const root = appliedRoot();
+  const input = path.join(root, '.review', 'ids.tmp');
+  fs.writeFileSync(
+    input,
+    JSON.stringify([
+      { source: 'R-001', file: 'src\\a.js', symbol: 'foo' },
+      { category: 'bug', file: 'src/a.js', symbol: 'bar' },
+      { category: 'bug', file: 'src/a.js', symbol: '$scope' },
+    ]),
+  );
+  const r = cli(root, 'ids', input);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), [
+    { id: VIOL_ID, status: 'open' },
+    { id: CAND_ID, status: 'dismissed' },
+    { id: findingId('explore:bug', 'src/a.js', '$scope'), status: null },
+  ]);
+  fs.writeFileSync(input, JSON.stringify([{ file: 'src/a.js' }]));
+  assert.equal(cli(root, 'ids', input).code, 1);
+});
+
+test('문서: 1차 Minor 정리가 스킬과 에이전트에 반영돼 있다', () => {
+  const read = (rel) => fs.readFileSync(fileURLToPath(new URL(`../${rel}`, import.meta.url)), 'utf8');
+  const review = read('skills/review/SKILL.md');
+  assert.match(review, /ledger\.mjs" ids /);
+  assert.match(review, /ledger\.mjs" list --ids /);
+  assert.match(review, /ledger\.mjs" list --status reopen-requested/);
+  assert.equal(/ledger\.mjs" id "/.test(review), false);
+
+  const decideSkill = read('skills/review-decide/SKILL.md');
+  assert.match(decideSkill, /--reason-file/);
+  assert.equal(/--reason "/.test(decideSkill), false);
+  assert.match(decideSkill, /기존 결정을 유지/);
+
+  assert.match(read('agents/explorer.md'), /따라가는 과정은 쓰지 않는다/);
 });

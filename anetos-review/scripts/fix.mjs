@@ -52,7 +52,7 @@ export function loadConfig(root) {
   }
   let cfg;
   try {
-    cfg = JSON.parse(raw.replace(/^﻿/, ''));
+    cfg = JSON.parse(raw.replace(/^\uFEFF/, ''));
   } catch (e) {
     throw new LedgerError(`config.json 을 읽을 수 없습니다: ${e.message}`);
   }
@@ -494,7 +494,7 @@ function main(argv) {
   if (cmd === 'config' && sub === 'set' && arg) {
     let cfg;
     try {
-      cfg = JSON.parse(fs.readFileSync(arg, 'utf8').replace(/^﻿/, ''));
+      cfg = JSON.parse(fs.readFileSync(arg, 'utf8').replace(/^\uFEFF/, ''));
     } catch (e) {
       throw new LedgerError(`설정 파일을 읽을 수 없습니다: ${e.message}`);
     }
