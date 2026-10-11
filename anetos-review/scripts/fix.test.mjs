@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { LedgerError, findingId, init, loadLedger, saveLedger } from './ledger.mjs';
 import {
   validateConfig, loadConfig, saveConfig, globToRegExp, isTestPath,
+  runCheck, compare,
 } from './fix.mjs';
 
 const PLUGIN_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -84,4 +85,60 @@ test('isTestPath: glob 이 디렉터리 경계를 지킨다', () => {
     assert.equal(isTestPath(cfg, file), false, file);
   }
   assert.equal(globToRegExp('a.b').test('axb'), false);
+});
+
+const HELPERS = tmpDir();
+
+function helper(name, code) {
+  const file = path.join(HELPERS, name);
+  fs.writeFileSync(file, code);
+  return `node "${file}"`;
+}
+
+const PASS = helper('pass.js', "console.log('ok');process.exit(0);");
+const FAIL = helper('fail.js', "console.error('boom');process.exit(1);");
+
+test('runCheck: 종료 코드 0 은 pass, 그 외는 fail', () => {
+  const root = tmpDir();
+  const pass = runCheck(root, { name: 'a', kind: 'test', command: PASS });
+  assert.deepEqual(
+    { name: pass.name, kind: pass.kind, result: pass.result, timedOut: pass.timedOut },
+    { name: 'a', kind: 'test', result: 'pass', timedOut: false },
+  );
+  const fail = runCheck(root, { name: 'b', kind: 'static', command: FAIL });
+  assert.equal(fail.result, 'fail');
+  assert.match(fail.tail, /boom/);
+});
+
+test('runCheck: 출력은 마지막 40줄만 남긴다', () => {
+  const cmd = helper('lines.js', "for(let i=1;i<=100;i++)console.log('line'+i);");
+  const lines = runCheck(tmpDir(), { name: 'a', kind: 'test', command: cmd }).tail.split('\n');
+  assert.ok(lines.length <= 40);
+  assert.ok(lines.includes('line100'));
+  assert.equal(lines.includes('line50'), false);
+});
+
+test('runCheck: 출력이 커도 통과한 검사는 pass 다', () => {
+  const cmd = helper('big.js', "process.stdout.write('x'.repeat(3*1024*1024)+'\\n');");
+  assert.equal(runCheck(tmpDir(), { name: 'a', kind: 'test', command: cmd }).result, 'pass');
+});
+
+test('runCheck: 제한 시간을 넘기면 fail 이다', () => {
+  const cmd = helper('slow.js', 'setTimeout(()=>process.exit(0),3000);');
+  const r = runCheck(tmpDir(), { name: 'a', kind: 'test', command: cmd, timeoutSec: 0.5 });
+  assert.equal(r.result, 'fail');
+  assert.equal(r.timedOut, true);
+});
+
+test('compare: 기준선 대비 네 가지 판정', () => {
+  const r = (name, result) => ({ name, kind: 'test', result, timedOut: false, tail: `${name}:${result}` });
+  const verdicts = compare(
+    [r('a', 'pass'), r('b', 'pass'), r('c', 'fail'), r('d', 'fail')],
+    [r('a', 'pass'), r('b', 'fail'), r('c', 'fail'), r('d', 'pass')],
+  );
+  assert.deepEqual(
+    verdicts.map((v) => [v.name, v.verdict]),
+    [['a', 'kept'], ['b', 'regressed'], ['c', 'masked'], ['d', 'improved']],
+  );
+  assert.equal(verdicts[1].tail, 'b:fail');
 });

@@ -97,3 +97,41 @@ export function globToRegExp(glob) {
 export function isTestPath(cfg, file) {
   return cfg.testPaths.some((glob) => globToRegExp(glob).test(file));
 }
+
+const TAIL_LINES = 40;
+const DEFAULT_TIMEOUT_SEC = 600;
+
+export function runCheck(root, check) {
+  const r = spawnSync(check.command, {
+    cwd: root,
+    shell: true,
+    encoding: 'utf8',
+    timeout: (check.timeoutSec ?? DEFAULT_TIMEOUT_SEC) * 1000,
+    maxBuffer: 256 * 1024 * 1024,
+    windowsHide: true,
+  });
+  const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+  return {
+    name: check.name,
+    kind: check.kind,
+    result: r.status === 0 && !r.error ? 'pass' : 'fail',
+    timedOut: r.error?.code === 'ETIMEDOUT',
+    tail: output.trimEnd().split(/\r?\n/).slice(-TAIL_LINES).join('\n'),
+  };
+}
+
+export function runChecks(root, cfg) {
+  return cfg.checks.map((check) => runCheck(root, check));
+}
+
+export function compare(baseline, current) {
+  const before = new Map(baseline.map((b) => [b.name, b.result]));
+  return current.map((c) => {
+    const was = before.get(c.name) ?? 'pass';
+    const verdict =
+      was === 'pass'
+        ? c.result === 'pass' ? 'kept' : 'regressed'
+        : c.result === 'pass' ? 'improved' : 'masked';
+    return { name: c.name, kind: c.kind, verdict, tail: c.tail };
+  });
+}
