@@ -274,7 +274,7 @@ test('start: 미추적 파일, 커밋 안 한 .review, 검사가 만든 파일�
   write(root, 'notes.txt', '메모');
   write(root, '.review/rules.md', '## R-900 고친 규칙\n');
   start(root, FID);
-  assert.deepEqual(readStateFile(root).untracked.sort(), ['coverage/out.txt', 'notes.txt']);
+  assert.deepEqual(Object.keys(readStateFile(root).known).sort(), ['coverage/out.txt', 'notes.txt']);
 });
 
 test('abort: 수정이 만든 변경만 되돌린다', () => {
@@ -289,7 +289,7 @@ test('abort: 수정이 만든 변경만 되돌린다', () => {
   write(root, 'src/b.js', 'staged\n');
   g(root, 'add', 'src/b.js');
 
-  assert.deepEqual(abort(root), { aborted: true, id: FID, fixAttempts: 1 });
+  assert.deepEqual(abort(root), { aborted: true, id: FID, fixAttempts: 1, unrestored: [] });
   assert.deepEqual(statusOutsideReview(root), before);
   assert.equal(fs.readFileSync(path.join(root, 'src', 'a.js'), 'utf8'), 'function foo() {}\n');
   assert.equal(fs.existsSync(path.join(root, 'test', '새 파일.test.js')), false);
@@ -456,6 +456,7 @@ test('stageFixed: 수정 단계에서 테스트를 고치면 통과하지 못한
   start(root, FID);
   write(root, 'test/a.test.js', 'REPRO\n');
   stageRed(root, true);
+  fixSource(root);
   write(root, 'test/a.test.js', '통과하도록 고친 테스트\n');
   assert.deepEqual(stageFixed(root, 'absent').reasons, ['tests-changed']);
 });
@@ -637,4 +638,152 @@ test('문서: fixer 와 두 스킬의 frontmatter, 필요한 명령과 지침이
   for (const agent of ['rule-checker', 'explorer']) {
     assert.match(read(`agents/${agent}.md`), /고쳐진 지적의 수정을 되돌리자는 지적은 내지 않는다/);
   }
+});
+
+const committedFiles = (root) =>
+  g(root, '-c', 'core.quotepath=false', 'show', '--name-only', '--format=', 'HEAD').trim().split('\n').sort();
+
+test('start: 지적의 파일이 git 에 추적되지 않으면 거부한다', () => {
+  const root = makeRepo();
+  g(root, 'rm', '-q', '--cached', 'src/a.js');
+  g(root, 'commit', '-q', '-m', 'untrack');
+  assert.throws(() => start(root, FID), /추적되지 않/);
+  assert.equal(fs.existsSync(path.join(root, '.review', 'fix.tmp')), false);
+});
+
+test('start: 저장소 최상위가 아닌 곳에서는 거부한다', () => {
+  const root = makeRepo();
+  const sub = path.join(root, 'pkg');
+  fs.mkdirSync(sub);
+  init(sub, PLUGIN_ROOT);
+  saveLedger(sub, loadLedger(root));
+  saveConfig(sub, loadConfig(root));
+  assert.throws(() => start(sub, FID), /최상위/);
+});
+
+test('원래 있던 미추적 파일을 수정이 바꾸면 범위 밖으로 잡히고 abort 가 되돌리지 못했다고 알린다', () => {
+  const root = makeRepo();
+  write(root, 'notes.txt', '메모');
+  start(root, FID);
+  write(root, 'test/a.test.js', 'REPRO\n');
+  stageRed(root, true);
+  fixSource(root);
+  write(root, 'notes.txt', '수정이 덮어쓴 메모');
+  assert.deepEqual(stageFixed(root, 'absent').outOfScope, ['notes.txt']);
+  assert.deepEqual(abort(root).unrestored, ['notes.txt']);
+});
+
+test('finish: stage fixed 이후 파일이 바뀌면 커밋하지 않는다', () => {
+  const edited = makeRepo();
+  toFixed(edited);
+  write(edited, 'src/a.js', 'function foo() { FIXED 그리고 확인 안 된 변경 }\n');
+  assert.throws(() => finish(edited), /stage fixed 를 다시/);
+  assert.equal(loadLedger(edited).findings[0].status, 'open');
+
+  const added = makeRepo();
+  toFixed(added);
+  write(added, 'src/other.js', '확인 안 된 새 파일\n');
+  assert.throws(() => finish(added), /stage fixed 를 다시/);
+});
+
+test('수정 도중 config.json 을 바꿔도 시작할 때의 검사로 판정하고, 커밋에는 원장만 들어간다', () => {
+  const root = makeRepo();
+  write(root, '.review/rules.md', '## R-900 커밋 안 한 규칙\n');
+  start(root, FID);
+  stageRed(root, false);
+  write(root, 'src/a.js', 'function foo() { BROKEN }\n');
+  saveConfig(root, {
+    version: 1,
+    checks: [{ name: 'other', kind: 'test', command: PASS }],
+    testPaths: ['**'],
+  });
+  assert.deepEqual(stageFixed(root, 'absent').reasons, ['regression']);
+
+  fixSource(root);
+  assert.equal(stageFixed(root, 'absent').ok, true);
+  finish(root);
+  assert.deepEqual(committedFiles(root), ['.review/findings.json', 'src/a.js']);
+  assert.match(g(root, 'status', '--porcelain'), /\.review\/rules\.md/);
+});
+
+test('수정 단계에서 기존 테스트 파일을 고치면 범위 밖으로 알린다', () => {
+  const root = makeRepo();
+  write(root, 'test/old.test.js', '기존 테스트\n');
+  g(root, 'add', '-A');
+  g(root, 'commit', '-q', '-m', 'old test');
+  start(root, FID);
+  write(root, 'test/a.test.js', 'REPRO\n');
+  stageRed(root, true);
+  fixSource(root);
+  write(root, 'test/old.test.js', '통과하도록 약하게 고친 기존 테스트\n');
+  const result = stageFixed(root, 'absent');
+  assert.deepEqual(result.outOfScope, ['test/old.test.js']);
+  assert.throws(() => finish(root), /allow-out-of-scope/);
+});
+
+test('검사가 실행마다 새 파일을 만들고 추적 파일을 고쳐도 수정의 변경으로 보지 않는다', () => {
+  const noisy = helper(
+    'noisy.js',
+    [
+      "const fs=require('fs');",
+      "fs.mkdirSync('coverage',{recursive:true});",
+      "fs.writeFileSync('coverage/run-'+Date.now()+'-'+Math.random()+'.json','{}');",
+      "fs.appendFileSync('report.txt','run\\n');",
+    ].join('\n'),
+  );
+  const root = makeRepo({
+    checks: [
+      { name: 'test', kind: 'test', command: SUITE },
+      { name: 'noisy', kind: 'static', command: noisy },
+    ],
+  });
+  write(root, 'report.txt', '');
+  g(root, 'add', '-A');
+  g(root, 'commit', '-q', '-m', 'report');
+
+  start(root, FID);
+  write(root, 'test/a.test.js', 'REPRO\n');
+  assert.deepEqual(stageRed(root, true).reasons, []);
+  fixSource(root);
+  const result = stageFixed(root, 'absent');
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.outOfScope, []);
+  finish(root);
+  assert.deepEqual(committedFiles(root), ['.review/findings.json', 'src/a.js', 'test/a.test.js']);
+  assert.ok(fs.readdirSync(path.join(root, 'coverage')).length >= 3);
+});
+
+test('finish: 대괄호가 든 파일 이름이 다른 파일을 끌고 들어가지 않는다', () => {
+  const root = makeRepo();
+  write(root, 'src/b.js', '사용자의 미추적 파일\n');
+  start(root, FID);
+  write(root, 'test/a.test.js', 'REPRO\n');
+  stageRed(root, true);
+  fixSource(root);
+  write(root, 'src/[ab].js', '수정이 만든 파일\n');
+  stageFixed(root, 'absent');
+  finish(root, { allowOutOfScope: true });
+  assert.deepEqual(committedFiles(root), [
+    '.review/findings.json', 'src/[ab].js', 'src/a.js', 'test/a.test.js',
+  ]);
+  assert.match(g(root, 'status', '--porcelain'), /\?\? src\/b\.js/);
+});
+
+test('stageFixed: 아무것도 고치지 않았으면 통과하지 못한다', () => {
+  const root = makeRepo();
+  start(root, FID);
+  stageRed(root, false);
+  assert.deepEqual(stageFixed(root, 'absent').reasons, ['nothing-fixed']);
+});
+
+test('runCheck: 제한 시간을 넘긴 검사의 프로세스가 남지 않는다', () => {
+  const marker = path.join(tmpDir(), 'late');
+  const cmd = `${helper(
+    'late.js',
+    "setTimeout(()=>require('fs').writeFileSync(process.argv[2],'x'),2500);",
+  )} "${marker}"`;
+  const r = runCheck(tmpDir(), { name: 'a', kind: 'test', command: cmd, timeoutSec: 0.5 });
+  assert.equal(r.timedOut, true);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3500);
+  assert.equal(fs.existsSync(marker), false);
 });

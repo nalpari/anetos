@@ -96,13 +96,22 @@ id, source, file, symbol, title, evidence
 node "${CLAUDE_PLUGIN_ROOT}/scripts/fix.mjs" stage fixed --recheck <absent|present>
 ```
 
-`ok` 가 거짓이면 fixer 를 `mode: fix` 로 **한 번** 다시 띄운다. `reasons` 와, `verdicts` 중 `regressed` 인 항목의 `tail` 을 함께 넘긴다. 그 뒤 재확인과 `stage fixed` 를 다시 한다. 두 번째도 거짓이면 6단계로 간다.
+`ok` 가 거짓이면 `reasons` 에 따라 한다.
+
+| reasons | 할 일 |
+|---|---|
+| `regression`, `finding-present`, `nothing-fixed` | fixer 를 `mode: fix` 로 **한 번** 다시 띄운다. `reasons` 와, `verdicts` 중 `regressed` 인 항목의 `tail` 을 함께 넘긴다. 그 뒤 재확인과 `stage fixed` 를 다시 한다 |
+| `tests-changed` | fixer 가 앞 단계의 테스트를 고쳤다. 원래 테스트를 되살릴 방법이 없으므로 다시 시도하지 않고 6단계로 간다 |
+
+두 번째도 거짓이면 6단계로 간다.
+
+`outOfScope` 에는 지적된 파일이 아닌데 수정 단계에서 바뀐 파일이 전부 들어온다. 다른 소스 파일뿐 아니라, 수정 단계에서 손댄 기존 테스트 파일과 새로 만든 테스트 파일도 포함된다. 기존 테스트를 고쳐서 통과시킨 것일 수 있으므로 5단계에서 사용자가 본다.
 
 ### 5. 마무리
 
 `stage fixed` 의 결과에 따라 한다.
 
-- `outOfScope` 가 비어 있지 않으면: 그 파일들의 diff 와 fixer 의 `note` 를 사용자에게 보여 주고 함께 커밋할지 묻는다.
+- `outOfScope` 가 비어 있지 않으면: 그 파일들의 변경 내용과 fixer 의 `note` 를 사용자에게 보여 주고 함께 커밋할지 묻는다. 새로 생긴 파일은 diff 에 나오지 않으므로 파일을 읽어 내용을 보여 준다.
 - `level` 이 `unverified` 이면: 전체 diff 를 보여 주고, 이 수정은 어떤 검사로도 확인되지 않았다고 말한 뒤 커밋할지 묻는다.
 
 사용자가 승인한 항목에 대해서만 해당 플래그를 붙인다. 승인하지 않았거나, 사용자의 답을 받을 수 없는 실행이면 플래그를 붙이지 않고 6단계로 간다. 스스로 승인하지 않는다.
@@ -121,6 +130,10 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/fix.mjs" finish [--allow-unverified] [--allo
 
 `verdicts` 에 `flaky` 가 있었으면 그 검사 이름을 알린다. 한 번 실패했다가 다시 실행해서 통과한 검사다.
 
+`finish` 는 `stage fixed` 가 확인한 내용과 지금의 파일이 다르면 거부한다. `stage fixed` 가 통과한 뒤에는 파일을 건드리지 않는다. 이 오류가 나면 재확인과 `stage fixed` 를 한 번 다시 한 뒤 `finish` 한다.
+
+`.review/` 에서는 원장(`findings.json`)만 커밋에 들어간다. 사용자가 커밋하지 않은 규칙이나 설정 변경은 그대로 남는다.
+
 커밋 훅 실패 등으로 `finish` 가 실패하면 오류를 그대로 전하고 멈춘다. 작업 트리에 수정이 남아 있으니, 원인을 해결한 뒤 `finish` 를 다시 실행하거나 `abort` 하라고 안내한다. 훅을 건너뛰는 방법을 쓰지 않는다.
 
 ### 6. 중단
@@ -129,7 +142,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/fix.mjs" finish [--allow-unverified] [--allo
 node "${CLAUDE_PLUGIN_ROOT}/scripts/fix.mjs" abort
 ```
 
-작업 트리가 시작 시점으로 돌아간다. 사용자에게 다음을 알린다.
+작업 트리가 시작 시점으로 돌아간다. 다만 결과의 `unrestored` 에 파일이 있으면, 그것은 시작 전부터 있던 미추적 파일을 수정이 바꾼 것이다. git 에 원본이 없어 되돌리지 못했으므로 어떤 파일인지 반드시 알린다.
+
+사용자에게 다음을 알린다.
 - 어느 단계에서 왜 멈췄는지 (`reasons`, 실패한 검사의 이름과 출력 끝부분)
 - 지적은 `open` 그대로이고 시도 횟수가 기록됐다는 것
 - 처리하지 않은 나머지 ID
