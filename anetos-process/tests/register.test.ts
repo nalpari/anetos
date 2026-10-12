@@ -249,6 +249,40 @@ test('흐름이 없을 때 패널은 안내를 보여 주고, ✕ 는 진행 바
   await band.unmount()
 })
 
+test('완료 내역 초기화 버튼은 끝난 흐름과 끝난 에이전트만 치운다', async ($, on) => {
+  mock.clock(on)
+  const seen = host(on)
+  agentsBeneath(on)
+  shell(on, { 'ledger.mjs" init': { stdout: '{}' }, 'ledger.mjs" apply': { stdout: '{ "new": ["F-1"] }' } })
+
+  await bash($, `node "${ROOT}/ledger.mjs" init`)
+  await spawn($, 'rule-checker', '', '규칙 검사')
+  await complete($, 'ag-1')
+  await spawn($, 'explorer', '', '자유 탐색')
+
+  // 진행 중: 끝난 에이전트만 치우고 흐름은 남긴다.
+  let pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await pane.press({ key: 'clear' })
+  await pane.unmount()
+  expect(seen.flow?.outcome).toBe('running')
+  expect(seen.agents.map(a => a.role)).toEqual(['explorer'])
+
+  await complete($, 'ag-2')
+  await bash($, `node "${ROOT}/ledger.mjs" apply .review/results.tmp`)
+  expect(seen.flow?.outcome).toBe('done')
+
+  for (const surface of SURFACES) {
+    pane = await $.ui.mount({ ...PANE, surface })
+    expect(await pane.find({ key: 'clear' })).toBeDefined()
+    await pane.unmount()
+  }
+  pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'clear' })
+  await pane.unmount()
+  expect(seen.flow).toBeNull()
+  expect(seen.agents).toEqual([])
+})
+
 test('/anetos-process 가 패널을 열고 닫는다', async ($, on) => {
   mock.clock(on)
   const open = new Set<string>()

@@ -232,6 +232,19 @@ export const register: Register = on => {
         onPress={() => update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed }))}
       />
     )
+    // 끝난 것만 치운다: 진행 중인 흐름과 실행 중인 에이전트는 남긴다.
+    const clearDone =
+      finished.length > 0 || (f && f.outcome !== 'running') ? (
+        <Button
+          key="clear"
+          label="완료 내역 초기화"
+          plain
+          onPress={async () => {
+            await update($, flow, prev => (prev && prev.outcome !== 'running' ? null : prev))
+            await update($, agents, prev => prev.filter(a => a.status === 'running'))
+          }}
+        />
+      ) : null
     const outcome =
       f && f.outcome !== 'running' ? (
         <Text key="outcome" bold color={f.outcome === 'aborted' ? 'red' : 'green'}>
@@ -265,6 +278,7 @@ export const register: Register = on => {
             />
           )}
           {outcome}
+          {clearDone}
           {running.length > 0 && (
             <Text key="h-run" dimColor>
               실행 중 · {running.length}
@@ -323,6 +337,7 @@ export const register: Register = on => {
           </Box>
         )}
         {outcome}
+        {clearDone}
         <Box flexDirection="column" marginTop={1}>
           {running.length > 0 && <Text dimColor>실행 중 · {running.length}</Text>}
           {running.map(agentRow)}
