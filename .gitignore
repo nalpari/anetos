@@ -2,3 +2,6 @@ node_modules/
 *.tmp
 anetos-process/.claude-plugin/types/
 anetos-process/tsconfig.json
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
