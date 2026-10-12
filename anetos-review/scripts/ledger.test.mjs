@@ -839,6 +839,8 @@ test('문서: 1차 Minor 정리가 스킬과 에이전트에 반영돼 있다', 
   assert.match(review, /ledger\.mjs" list --ids /);
   assert.match(review, /ledger\.mjs" list --status reopen-requested/);
   assert.equal(/ledger\.mjs" id "/.test(review), false);
+  assert.match(review, /`--no-explore` 가 있으면 \*\*확인 리뷰\*\*/);
+  assert.match(review, /확인 리뷰이면 이 단계와 6단계를 건너뛰고/);
 
   const decideSkill = read('skills/review-decide/SKILL.md');
   assert.match(decideSkill, /--reason-file/);

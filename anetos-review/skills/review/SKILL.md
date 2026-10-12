@@ -17,6 +17,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" <명령>
 
 ## 1. 범위 확정
 
+인자에 `--no-explore` 가 있으면 **확인 리뷰**다. 그 인자는 경로가 아니므로 빼고 나머지로 범위를 정한다. 확인 리뷰는 지적을 고친 뒤 그것이 해결됐는지 보려는 것이므로 새 문제를 찾는 5단계와 6단계를 건너뛴다. 사용자가 인자 없이 "확인 리뷰"나 "자유 탐색 없이"라고 말한 경우도 같다.
+
 - 인자로 경로를 받았으면 그 경로 아래의 소스 파일이 범위다.
 - 인자가 없으면 기준 브랜치 대비 변경된 파일이 범위다. 기준 브랜치는 `main`, 없으면 `master` 다.
 
@@ -88,6 +90,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" list --status reopen-requested
 
 ## 5. 자유 탐색
 
+확인 리뷰이면 이 단계와 6단계를 건너뛰고 `candidates` 를 빈 배열로 둔 채 7단계로 간다. explorer 를 띄우지 않는다.
+
 `anetos-review:explorer` 를 **하나만** 띄운다. 범위가 커도 나누지 않는다.
 
 넘기는 내용: 범위 파일 목록, 규칙의 ID 와 제목 목록, 범위의 기존 지적 목록(`id`, `source`, `symbol`, `title`, `status`), 그리고 4단계와 같은 고쳐진 지적 목록.
@@ -148,6 +152,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.mjs" apply .review/results.tmp
 지적을 기존 것과 같은 것으로 볼지, 결정과 충돌하는지, 재발인지는 `apply` 가 판정한다. 당신이 따로 판정하지 않는다.
 
 ## 8. 보고
+
+확인 리뷰였으면 맨 앞에 "확인 리뷰: 자유 탐색을 건너뛰었습니다" 라고 한 줄로 알린다. 신규는 규칙 검사에서 나온 것뿐이다.
 
 `apply` 가 돌려준 요약의 ID 로 지적을 조회해 다섯 묶음으로 보여 준다. 비어 있는 묶음은 생략한다.
 

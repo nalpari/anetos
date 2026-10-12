@@ -36,7 +36,10 @@ claude --plugin-dir ./anetos-review --plugin-dir ./anetos-process
 ```
 /anetos-review:review            기준 브랜치(main, 없으면 master) 대비 변경된 파일
 /anetos-review:review src        경로를 지정
+/anetos-review:review --no-explore        확인 리뷰: 자유 탐색을 건너뛴다 (경로와 함께 쓸 수 있다)
 ```
+
+자유 탐색은 실행할 때마다 다른 후보를 낼 수 있다. 지적을 고친 뒤 해결됐는지만 보려면 `--no-explore` 로 실행한다. 기존 지적 재확인과 규칙 검사만 하므로 열린 지적이 없으면 끝난 것이다.
 
 처음 실행하면 대상 저장소에 `.review/` 가 생긴다. 결과는 신규 / 여전히 열려 있음 / 해결됨 / 재발 / 재검토 요청의 다섯 묶음으로 보고된다. 리뷰는 코드를 고치지 않고 커밋도 하지 않는다. `.review/` 의 변경은 코드와 함께 직접 커밋한다.
 
