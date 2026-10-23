@@ -312,3 +312,33 @@ test('/anetos-process 가 패널을 열고 닫는다', async ($, on) => {
   expect((await run()).text).toBe('패널을 닫았습니다.')
   expect([...open]).toEqual([])
 })
+
+test('/anetos-process 로 닫으면 다 끝난 내용은 비우고, 진행 중이면 그대로 둔다', async ($, on) => {
+  mock.clock(on)
+  const seen = host(on)
+  agentsBeneath(on)
+  shell(on, { 'ledger.mjs" init': { stdout: '{}' }, 'ledger.mjs" apply': { stdout: '{ "new": ["F-1"] }' } })
+  let isOpen = true
+  on('ui.panes', (async () => ({ value: isOpen ? [{ id: 'anetos-process' }] : [] })) as never)
+  on('ui.close', (async () => {
+    isOpen = false
+    return { value: undefined }
+  }) as never)
+  const close = () => {
+    isOpen = true
+    return $.command.run({ command: 'anetos-process', args: '', origin: { kind: 'user' }, presentation: {} } as never)
+  }
+
+  await bash($, `node "${ROOT}/ledger.mjs" init`)
+  await spawn($, 'rule-checker', '', '규칙 검사')
+  await complete($, 'ag-1')
+  await close()
+  expect(seen.flow?.outcome).toBe('running')
+  expect(seen.agents).toHaveLength(1)
+
+  await bash($, `node "${ROOT}/ledger.mjs" apply .review/results.tmp`)
+  expect(seen.flow?.outcome).toBe('done')
+  await close()
+  expect(seen.flow).toBeNull()
+  expect(seen.agents).toEqual([])
+})

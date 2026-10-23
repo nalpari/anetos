@@ -113,7 +113,14 @@ export const register: Register = on => {
 
   on('command.run', { command: 'anetos-process' }, async $ => {
     const isOpen = await togglePane($)
-    return { text: isOpen ? '패널을 열었습니다.' : '패널을 닫았습니다.' }
+    if (isOpen) return { text: '패널을 열었습니다.' }
+    // 다 끝난 뒤에 닫으면 내용을 비운다. 진행 중이면 그대로 둔다.
+    const isBusy = (await read($, flow))?.outcome === 'running' || (await read($, agents)).some(a => a.status === 'running')
+    if (!isBusy) {
+      await update($, flow, () => null)
+      await update($, agents, () => [])
+    }
+    return { text: '패널을 닫았습니다.' }
   })
 
   // 읽기만 한다: 호출은 그대로 실행하고 결과도 그대로 돌려준다.
