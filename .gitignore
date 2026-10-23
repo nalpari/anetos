@@ -2,10 +2,3 @@ node_modules/
 *.tmp
 anetos-process/.claude-plugin/types/
 anetos-process/tsconfig.json
-
-# graft's local graph cache — regenerable, not committed (run `graft build`).
-/graft/
-
-# 개인 도구(graft) 설정 — 로컬 경로가 들어 있어 커밋하지 않는다.
-/.claude/
-/.mcp.json
